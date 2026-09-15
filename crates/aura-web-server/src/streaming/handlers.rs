@@ -2565,7 +2565,12 @@ mod tests {
             );
 
             let stream = MockAgent::scripted(steps)
-                .stream("q", vec![], CancellationToken::new(), "req_tool_events")
+                .stream(
+                    "q".into(),
+                    vec![],
+                    CancellationToken::new(),
+                    "req_tool_events",
+                )
                 .await
                 .expect("mock stream should start");
 

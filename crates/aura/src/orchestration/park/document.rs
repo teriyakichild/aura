@@ -374,8 +374,24 @@ mod tests {
         pending_by_task.insert(0, pending);
 
         let chat_history = vec![rig::completion::Message::user("prior turn")];
+        // The query's image lives only in the coordinator conversation once
+        // parked (`query` is its text), so it must survive the round trip.
+        let image = rig::message::UserContent::image_base64(
+            "iVBORw0KGgo=",
+            Some(rig::message::ImageMediaType::PNG),
+            Some(rig::message::ImageDetail::Auto),
+        );
+        let coordinator_conversation = vec![rig::completion::Message::User {
+            content: rig::OneOrMany::many(vec![
+                rig::message::UserContent::text("plan this frame"),
+                image.clone(),
+            ])
+            .unwrap(),
+        }];
+        let mut state = park_fixture_state("Deploy", &chat_history);
+        state.coordinator_conversation = &coordinator_conversation;
         let doc = build_document(
-            &park_fixture_state("Deploy", &chat_history),
+            &state,
             &plan,
             &records,
             &pending_by_task,
@@ -394,6 +410,20 @@ mod tests {
         assert_eq!(node.awaiting()[0].tool_name, "kubectl_delete");
         assert_eq!(node.history.as_ref().map(Vec::len), Some(1));
         assert!(node.current_prompt.is_some());
+        let rig::completion::Message::User { content } = &back.coordinator_conversation[0] else {
+            panic!("coordinator turn is a user message");
+        };
+        // rig's flattened `additional_params` deserializes as an empty object,
+        // so compare the image's own fields rather than the whole value.
+        let Some(rig::message::UserContent::Image(back_image)) = content.iter().nth(1) else {
+            panic!("image part survives the round trip");
+        };
+        let rig::message::UserContent::Image(image) = image else {
+            unreachable!()
+        };
+        assert_eq!(back_image.data, image.data);
+        assert_eq!(back_image.media_type, image.media_type);
+        assert_eq!(back_image.detail, image.detail);
     }
 
     #[test]

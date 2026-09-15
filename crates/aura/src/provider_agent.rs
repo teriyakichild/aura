@@ -11,7 +11,7 @@
 
 use futures::stream::StreamExt;
 use rig::agent::{AgentBuilder, AgentBuilderSimple, MultiTurnStreamItem};
-use rig::completion::{CompletionModel, Usage};
+use rig::completion::{CompletionModel, Message, Usage};
 use rig::message::ToolResultContent;
 use rig::streaming::{StreamingChat, StreamingPrompt};
 use std::collections::HashSet;
@@ -217,7 +217,7 @@ impl ProviderAgent {
     /// The stream items are type-erased using serde_json for the response content.
     pub async fn stream_prompt(
         &self,
-        query: &str,
+        query: Message,
         max_depth: usize,
     ) -> Pin<Box<dyn futures::Stream<Item = Result<StreamItem, StreamError>> + Send>> {
         match self {
@@ -256,7 +256,7 @@ impl ProviderAgent {
     /// Stream a chat with history and multi-turn support.
     pub async fn stream_chat(
         &self,
-        query: &str,
+        query: Message,
         chat_history: Vec<rig::completion::Message>,
         max_depth: usize,
     ) -> Pin<Box<dyn futures::Stream<Item = Result<StreamItem, StreamError>> + Send>> {
@@ -322,7 +322,7 @@ impl ProviderAgent {
     /// - usage_state: Shared state for reading final usage at stream end
     pub async fn stream_prompt_with_timeout(
         &self,
-        query: &str,
+        query: Message,
         max_depth: usize,
         timeout: Duration,
         request_id: &str,
@@ -435,7 +435,7 @@ impl ProviderAgent {
     #[allow(clippy::too_many_arguments)]
     pub async fn stream_chat_with_timeout(
         &self,
-        query: &str,
+        query: Message,
         chat_history: Vec<rig::completion::Message>,
         max_depth: usize,
         timeout: Duration,

@@ -216,7 +216,7 @@ async fn build_agent_for_request(
 /// Shared request setup extracted from the incoming ChatCompletionRequest.
 /// Used by both streaming and non-streaming handlers.
 pub struct RequestSetup {
-    pub query: String,
+    pub query: aura::Message,
     pub chat_history: Vec<aura::Message>,
     pub streaming_agent: Arc<dyn StreamingAgent>,
     pub config: aura_config::Config,
@@ -501,7 +501,7 @@ pub fn build_completion_config(
         active_requests: data.active_requests.clone(),
         provider,
         model,
-        query_for_otel: setup.query.clone(),
+        query_for_otel: aura::message_text(&setup.query),
         message_count,
         response_content,
         pending_approvals: data.pending_approvals.clone(),
@@ -564,7 +564,7 @@ pub async fn execute_completion(
     // Create stream with timeout — single path for both Agent and Orchestrator
     let (stream, cancel_tx, usage_state) = streaming_agent
         .stream_with_timeout(
-            &query,
+            query,
             chat_history,
             config.timeout_duration,
             &config.request_id,
@@ -703,7 +703,7 @@ fn build_json_response(
             index: 0,
             message: ChatMessage {
                 role: Role::Assistant,
-                content: Some(collected.outcome.content),
+                content: Some(collected.outcome.content.into()),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -826,16 +826,17 @@ async fn handle_streaming_completion(
 fn convert_chat_messages(
     messages: &[ChatMessage],
     client_tools_enabled: bool,
-) -> Result<(String, Vec<aura::Message>), PrepareError> {
+) -> Result<(aura::Message, Vec<aura::Message>), PrepareError> {
     let (query, history_msgs) = extract_query_and_history(messages, client_tools_enabled)?;
     let chat_history = history_msgs
         .into_iter()
-        .filter_map(|msg| convert_message(msg, client_tools_enabled))
-        .collect();
+        .map(|msg| convert_message(msg, client_tools_enabled))
+        .filter_map(Result::transpose)
+        .collect::<Result<_, _>>()?;
     Ok((query, chat_history))
 }
 
-/// Separate the query string from the history messages.
+/// Separate the query message from the history messages.
 ///
 /// - **Tool follow-up** (last msg is `Role::Tool` && `client_tools_enabled`): finds
 ///   the most recent `Role::User` message, uses its content as the query, and
@@ -844,10 +845,12 @@ fn convert_chat_messages(
 /// - **Normal** (last msg is `Role::User`): query is the last message's content,
 ///   history is everything before it.
 /// - **Empty input or other terminal role**: returns an error.
+///
+/// A query with no usable content becomes an empty text prompt.
 fn extract_query_and_history(
     messages: &[ChatMessage],
     client_tools_enabled: bool,
-) -> Result<(String, Vec<&ChatMessage>), PrepareError> {
+) -> Result<(aura::Message, Vec<&ChatMessage>), PrepareError> {
     let last_msg = messages
         .last()
         .ok_or_else(|| PrepareError::BadRequest("messages array is empty".to_string()))?;
@@ -861,7 +864,7 @@ fn extract_query_and_history(
                     "tool result messages require a preceding user message".to_string(),
                 )
             })?;
-        let query = messages[last_user_idx].content.clone().unwrap_or_default();
+        let query = query_message(&messages[last_user_idx])?;
         let history = messages
             .iter()
             .enumerate()
@@ -870,7 +873,7 @@ fn extract_query_and_history(
             .collect();
         Ok((query, history))
     } else if last_msg.role == Role::User {
-        let query = last_msg.content.clone().unwrap_or_default();
+        let query = query_message(last_msg)?;
         let history = messages[..messages.len() - 1].iter().collect();
         Ok((query, history))
     } else {
@@ -883,32 +886,99 @@ fn extract_query_and_history(
 }
 
 /// Dispatch a single `ChatMessage` to the appropriate role-specific converter.
-fn convert_message(msg: &ChatMessage, client_tools_enabled: bool) -> Option<aura::Message> {
+fn convert_message(
+    msg: &ChatMessage,
+    client_tools_enabled: bool,
+) -> Result<Option<aura::Message>, PrepareError> {
     match msg.role {
         Role::System => {
             tracing::warn!(
                 "Dropping system role message from chat history — Aura's preamble is authoritative"
             );
-            None
+            Ok(None)
         }
         Role::User => convert_user_message(msg),
-        Role::Assistant => convert_assistant_message(msg, client_tools_enabled),
-        Role::Tool => convert_tool_message(msg, client_tools_enabled),
+        Role::Assistant => Ok(convert_assistant_message(msg, client_tools_enabled)),
+        Role::Tool => Ok(convert_tool_message(msg, client_tools_enabled)),
         Role::Unknown => {
             tracing::warn!(role = %msg.role, "Skipping message with unknown role");
-            None
+            Ok(None)
         }
     }
 }
 
-/// Convert a `Role::User` message, dropping it if the content is empty/whitespace.
-fn convert_user_message(msg: &ChatMessage) -> Option<aura::Message> {
-    let content = msg.content.as_deref().unwrap_or("");
-    if content.trim().is_empty() {
-        tracing::warn!(role = %msg.role, "Dropping empty message from chat history");
-        return None;
+/// Convert the query `ChatMessage`; a message with no usable content becomes
+/// an empty text prompt.
+fn query_message(msg: &ChatMessage) -> Result<aura::Message, PrepareError> {
+    Ok(convert_user_message(msg)?.unwrap_or_else(|| aura::Message::user("")))
+}
+
+/// Convert a `Role::User` message, dropping it if it carries neither
+/// non-whitespace text nor an image.
+fn convert_user_message(msg: &ChatMessage) -> Result<Option<aura::Message>, PrepareError> {
+    let parts = match &msg.content {
+        Some(MessageContent::Text(text)) => vec![aura::UserContent::text(text)],
+        Some(MessageContent::Parts(parts)) => parts
+            .iter()
+            .map(convert_content_part)
+            .collect::<Result<_, _>>()?,
+        None => Vec::new(),
+    };
+    let parts: Vec<aura::UserContent> = parts
+        .into_iter()
+        .filter(|part| match part {
+            aura::UserContent::Text(text) => !text.text.trim().is_empty(),
+            _ => true,
+        })
+        .collect();
+    match aura::OneOrMany::many(parts) {
+        Ok(content) => Ok(Some(aura::Message::User { content })),
+        Err(_) => {
+            tracing::warn!(role = %msg.role, "Dropping empty message from chat history");
+            Ok(None)
+        }
     }
-    Some(aura::Message::user(content))
+}
+
+/// Convert one OpenAI content part into rig user content.
+///
+/// `image_url` accepts only a `data:<mime>[;param…];base64,<data>` URL, which
+/// becomes an inline base64 image every provider receives directly. Remote
+/// `http(s)` URLs are refused: Bedrock rejects them and Ollama drops them
+/// without telling the client. A non-base64 data URL or an image media type rig
+/// does not model is a 400 as well.
+fn convert_content_part(part: &ContentPart) -> Result<aura::UserContent, PrepareError> {
+    use aura::{ImageMediaType, MimeType};
+
+    match part {
+        ContentPart::Text { text } => Ok(aura::UserContent::text(text)),
+        ContentPart::ImageUrl { image_url } => {
+            let data_url = image_url.url.strip_prefix("data:").ok_or_else(|| {
+                PrepareError::BadRequest(
+                    "image_url must be a base64 data URL: data:<mime>;base64,<data>".to_string(),
+                )
+            })?;
+            let (mime, data) = data_url.split_once(";base64,").ok_or_else(|| {
+                PrepareError::BadRequest(
+                    "image_url data URL must be base64-encoded: data:<mime>;base64,<data>"
+                        .to_string(),
+                )
+            })?;
+            // Media-type parameters (`image/png;charset=…`) don't affect decoding.
+            let mime = mime.split(';').next().unwrap_or(mime);
+            let media_type = ImageMediaType::from_mime_type(mime).ok_or_else(|| {
+                PrepareError::BadRequest(format!("unsupported image media type: {mime}"))
+            })?;
+            // rig's OpenAI conversion refuses a base64 image without a detail
+            // level, so an absent `detail` becomes OpenAI's own default.
+            let detail = image_url.detail.map_or(aura::ImageDetail::Auto, Into::into);
+            Ok(aura::UserContent::image_base64(
+                data,
+                Some(media_type),
+                Some(detail),
+            ))
+        }
+    }
 }
 
 /// Convert a `Role::Assistant` message.
@@ -925,7 +995,11 @@ fn convert_assistant_message(
         return convert_assistant_with_tool_calls(msg, tool_calls);
     }
 
-    let content = msg.content.as_deref().unwrap_or("");
+    let content = msg
+        .content
+        .as_ref()
+        .map(MessageContent::text)
+        .unwrap_or_default();
     if content.trim().is_empty() {
         tracing::warn!(role = %msg.role, "Dropping empty message from chat history");
         return None;
@@ -942,7 +1016,7 @@ fn convert_assistant_with_tool_calls(
 
     let mut contents: Vec<AssistantContent> = Vec::new();
 
-    if let Some(text) = &msg.content
+    if let Some(text) = msg.content.as_ref().map(MessageContent::text)
         && !text.is_empty()
     {
         contents.push(AssistantContent::text(text));
@@ -981,7 +1055,7 @@ fn convert_tool_message(msg: &ChatMessage, client_tools_enabled: bool) -> Option
     {
         let tool_result = UserContent::tool_result(
             tool_call_id.clone(),
-            OneOrMany::one(aura::ToolResultContent::text(content)),
+            OneOrMany::one(aura::ToolResultContent::text(content.text())),
         );
         return Some(aura::Message::User {
             content: OneOrMany::one(tool_result),
@@ -1351,7 +1425,7 @@ mod tests {
     fn msg(role: Role, content: &str) -> ChatMessage {
         ChatMessage {
             role,
-            content: Some(content.to_string()),
+            content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -1464,7 +1538,7 @@ mod tests {
             }
         }));
         let setup = RequestSetup {
-            query: "trigger approval".to_string(),
+            query: "trigger approval".into(),
             chat_history: vec![],
             streaming_agent: agent,
             config: make_test_config(),
@@ -1536,6 +1610,107 @@ mod tests {
         );
     }
 
+    fn user_parts(parts: serde_json::Value) -> ChatMessage {
+        serde_json::from_value(serde_json::json!({"role": "user", "content": parts})).unwrap()
+    }
+
+    fn image_parts(query: &aura::Message) -> Vec<&aura::UserContent> {
+        match query {
+            aura::Message::User { content } => content
+                .iter()
+                .filter(|c| matches!(c, aura::UserContent::Image(_)))
+                .collect(),
+            aura::Message::Assistant { .. } => panic!("query must be a user message"),
+        }
+    }
+
+    #[test]
+    fn image_data_url_becomes_inline_base64_image() {
+        let messages = vec![user_parts(serde_json::json!([
+            {"type": "text", "text": "what color?"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR", "detail": "high"}}
+        ]))];
+        let (query, history) = convert_chat_messages(&messages, false).unwrap();
+        assert!(history.is_empty());
+        assert_eq!(aura::message_text(&query), "what color?");
+        let images = image_parts(&query);
+        assert_eq!(images.len(), 1);
+        let aura::UserContent::Image(image) = images[0] else {
+            unreachable!()
+        };
+        assert_eq!(image.media_type, Some(aura::ImageMediaType::PNG));
+        assert_eq!(image.detail, Some(aura::ImageDetail::High));
+        assert_eq!(
+            image.data,
+            aura::DocumentSourceKind::Base64("iVBOR".into()),
+            "base64 payload is passed through untouched"
+        );
+    }
+
+    #[test]
+    fn image_only_query_with_mime_parameters_is_kept() {
+        let messages = vec![user_parts(serde_json::json!([
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;charset=utf-8;base64,/9j/"}}
+        ]))];
+        let (query, _) = convert_chat_messages(&messages, false).unwrap();
+        let images = image_parts(&query);
+        let aura::UserContent::Image(image) = images[0] else {
+            unreachable!()
+        };
+        assert_eq!(image.media_type, Some(aura::ImageMediaType::JPEG));
+        assert_eq!(image.data, aura::DocumentSourceKind::Base64("/9j/".into()));
+        assert_eq!(image.detail, Some(aura::ImageDetail::Auto));
+        // Image-only query is not treated as empty.
+        assert_eq!(aura::message_text(&query), "");
+    }
+
+    #[test]
+    fn image_only_history_message_is_kept() {
+        let messages = vec![
+            user_parts(serde_json::json!([
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,/9j/"}}
+            ])),
+            msg(Role::Assistant, "I see a door."),
+            msg(Role::User, "Anything else?"),
+        ];
+        let (_, history) = convert_chat_messages(&messages, false).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(image_parts(&history[0]).len(), 1);
+    }
+
+    #[test]
+    fn invalid_image_urls_are_bad_requests() {
+        for url in [
+            "data:image/png,notbase64",
+            "data:image/tiff;base64,AAAA",
+            "https://cams.example/frame.jpg",
+            "file:///etc/passwd",
+        ] {
+            let messages = vec![user_parts(serde_json::json!([
+                {"type": "image_url", "image_url": {"url": url}}
+            ]))];
+            match convert_chat_messages(&messages, false) {
+                Err(PrepareError::BadRequest(_)) => {}
+                other => panic!("{url}: expected BadRequest, got {:?}", other.map(|_| ())),
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_image_in_history_is_also_rejected() {
+        let messages = vec![
+            user_parts(serde_json::json!([
+                {"type": "image_url", "image_url": {"url": "ftp://x/y.png"}}
+            ])),
+            msg(Role::Assistant, "ok"),
+            msg(Role::User, "next"),
+        ];
+        assert!(matches!(
+            convert_chat_messages(&messages, false),
+            Err(PrepareError::BadRequest(_))
+        ));
+    }
+
     #[test]
     fn test_system_messages_dropped() {
         let messages = vec![
@@ -1568,7 +1743,7 @@ mod tests {
             msg(Role::User, "How are you?"),
         ];
         let (query, history) = convert_chat_messages(&messages, false).unwrap();
-        assert_eq!(query, "How are you?");
+        assert_eq!(aura::message_text(&query), "How are you?");
         assert_eq!(history.len(), 2); // "Hello" + "Hi there"
     }
 
@@ -1583,7 +1758,7 @@ mod tests {
             msg(Role::User, "Tell me more"),
         ];
         let (query, history) = convert_chat_messages(&messages, false).unwrap();
-        assert_eq!(query, "Tell me more");
+        assert_eq!(aura::message_text(&query), "Tell me more");
         // system dropped, empty assistant filtered → user + assistant(non-empty)
         assert_eq!(history.len(), 2);
     }
@@ -1617,7 +1792,7 @@ mod tests {
     fn tool_msg(tool_call_id: &str, content: &str) -> ChatMessage {
         ChatMessage {
             role: Role::Tool,
-            content: Some(content.to_string()),
+            content: Some(content.into()),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.to_string()),
             name: None,
@@ -1630,7 +1805,7 @@ mod tests {
     ) -> ChatMessage {
         ChatMessage {
             role: Role::Assistant,
-            content: content.map(|s| s.to_string()),
+            content: content.map(Into::into),
             tool_calls: Some(
                 tool_calls
                     .into_iter()
@@ -1657,7 +1832,7 @@ mod tests {
             tool_msg("tc_1", r#"{"temp": 72}"#),
         ];
         let (query, history) = convert_chat_messages(&messages, true).unwrap();
-        assert_eq!(query, "What is the weather?");
+        assert_eq!(aura::message_text(&query), "What is the weather?");
         // History: assistant with tool_calls + tool result; user message extracted as query
         assert_eq!(history.len(), 2);
     }
@@ -1682,7 +1857,7 @@ mod tests {
             msg(Role::User, "Thanks"),
         ];
         let (query, history) = convert_chat_messages(&messages, true).unwrap();
-        assert_eq!(query, "Thanks");
+        assert_eq!(aura::message_text(&query), "Thanks");
         assert_eq!(history.len(), 1);
         // The assistant message should be the multi-content variant
         match &history[0] {
@@ -1719,7 +1894,7 @@ mod tests {
     fn test_tool_message_missing_tool_call_id_skipped() {
         let bad_tool = ChatMessage {
             role: Role::Tool,
-            content: Some("result".to_string()),
+            content: Some("result".into()),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -1730,7 +1905,7 @@ mod tests {
             msg(Role::User, "Second"),
         ];
         let (query, history) = convert_chat_messages(&messages, true).unwrap();
-        assert_eq!(query, "Second");
+        assert_eq!(aura::message_text(&query), "Second");
         // bad_tool skipped, "First" is the only history entry
         assert_eq!(history.len(), 1);
     }
@@ -2211,7 +2386,7 @@ url = "http://127.0.0.1:9"
         // Test that MessageRole::Assistant serializes to "assistant"
         let delta = ChatCompletionChunkDelta {
             role: Some(MessageRole::Assistant),
-            content: Some("Hello".to_string()),
+            content: Some("Hello".into()),
             tool_calls: None,
         };
 
@@ -2225,7 +2400,7 @@ url = "http://127.0.0.1:9"
         // Test that role field is omitted when None
         let delta = ChatCompletionChunkDelta {
             role: None,
-            content: Some("World".to_string()),
+            content: Some("World".into()),
             tool_calls: None,
         };
 

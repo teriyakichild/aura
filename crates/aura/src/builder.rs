@@ -1180,18 +1180,19 @@ impl Agent {
     /// Process a query with the agent (no chat history).
     ///
     /// Uses the streaming pipeline internally and collects the result.
-    #[tracing::instrument(name = "agent.prompt", skip(self), fields(model = %self.model))]
+    #[tracing::instrument(name = "agent.prompt", skip(self, query), fields(model = %self.model))]
     pub async fn prompt(
         &self,
-        query: &str,
+        query: impl Into<rig::completion::Message>,
     ) -> Result<crate::provider_agent::CompletionResponse, Box<dyn std::error::Error + Send + Sync>>
     {
+        let query = query.into();
         let span = tracing::Span::current();
         record_input_attributes(
             &span,
             self.inner.provider_name(),
             &self.model,
-            query,
+            &crate::streaming::message_text(&query),
             &self.system_prompt,
         );
         self.record_llm_call_attributes(&span);
@@ -1205,19 +1206,20 @@ impl Agent {
     /// Process a chat query with conversation history.
     ///
     /// Uses the streaming pipeline internally and collects the result.
-    #[tracing::instrument(name = "agent.chat", skip(self, chat_history), fields(model = %self.model, history_len = chat_history.len()))]
+    #[tracing::instrument(name = "agent.chat", skip(self, query, chat_history), fields(model = %self.model, history_len = chat_history.len()))]
     pub async fn chat(
         &self,
-        query: &str,
+        query: impl Into<rig::completion::Message>,
         chat_history: Vec<rig::completion::Message>,
     ) -> Result<crate::provider_agent::CompletionResponse, Box<dyn std::error::Error + Send + Sync>>
     {
+        let query = query.into();
         let span = tracing::Span::current();
         record_input_attributes(
             &span,
             self.inner.provider_name(),
             &self.model,
-            query,
+            &crate::streaming::message_text(&query),
             &self.system_prompt,
         );
         self.record_llm_call_attributes(&span);
@@ -1287,21 +1289,21 @@ impl Agent {
     /// Stream a query with the agent (no chat history) - returns true streaming response with multi-turn tool support
     pub async fn stream_prompt(
         &self,
-        query: &str,
+        query: impl Into<rig::completion::Message>,
     ) -> Pin<Box<dyn futures::stream::Stream<Item = Result<StreamItem, StreamError>> + Send>> {
-        let stream = self.inner.stream_prompt(query, self.max_depth).await;
+        let stream = self.inner.stream_prompt(query.into(), self.max_depth).await;
         self.maybe_wrap_with_fallback(self.count_turns(stream))
     }
 
     /// Stream a chat query with conversation history - returns true streaming response with multi-turn tool support
     pub async fn stream_chat(
         &self,
-        query: &str,
+        query: impl Into<rig::completion::Message>,
         chat_history: Vec<rig::completion::Message>,
     ) -> Pin<Box<dyn futures::stream::Stream<Item = Result<StreamItem, StreamError>> + Send>> {
         let stream = self
             .inner
-            .stream_chat(query, chat_history, self.max_depth)
+            .stream_chat(query.into(), chat_history, self.max_depth)
             .await;
         self.maybe_wrap_with_fallback(self.count_turns(stream))
     }
@@ -1310,15 +1312,18 @@ impl Agent {
     ///
     /// Unlike `stream_chat()` which uses `self.max_depth`, this allows callers
     /// to specify depth. Used by orchestration phases that need tighter bounds.
-    #[tracing::instrument(name = "agent.stream_chat", skip(self, chat_history),
+    #[tracing::instrument(name = "agent.stream_chat", skip(self, query, chat_history),
         fields(model = %self.model, history_len = chat_history.len(), max_depth))]
     pub async fn stream_chat_with_depth(
         &self,
-        query: &str,
+        query: impl Into<rig::completion::Message>,
         chat_history: Vec<rig::completion::Message>,
         max_depth: usize,
     ) -> Pin<Box<dyn futures::stream::Stream<Item = Result<StreamItem, StreamError>> + Send>> {
-        let stream = self.inner.stream_chat(query, chat_history, max_depth).await;
+        let stream = self
+            .inner
+            .stream_chat(query.into(), chat_history, max_depth)
+            .await;
         self.maybe_wrap_with_fallback(self.count_turns(stream))
     }
 
@@ -1426,7 +1431,7 @@ impl Agent {
     /// * UsageState for reading final usage at stream end (shared with hook)
     pub async fn stream_prompt_with_timeout(
         &self,
-        query: &str,
+        query: impl Into<rig::completion::Message>,
         timeout: Duration,
         request_id: &str,
     ) -> (
@@ -1434,7 +1439,8 @@ impl Agent {
         watch::Sender<bool>,
         crate::streaming_request_hook::UsageState,
     ) {
-        self.seed_scratchpad_request_input(query, &[]);
+        let query = query.into();
+        self.seed_scratchpad_request_input(&query, &[]);
         let (stream, cancel_tx, usage_state) = self
             .inner
             .stream_prompt_with_timeout(
@@ -1470,7 +1476,7 @@ impl Agent {
     /// See `stream_prompt_with_timeout` for cancellation details.
     pub async fn stream_chat_with_timeout(
         &self,
-        query: &str,
+        query: impl Into<rig::completion::Message>,
         chat_history: Vec<rig::completion::Message>,
         timeout: Duration,
         request_id: &str,
@@ -1479,7 +1485,8 @@ impl Agent {
         watch::Sender<bool>,
         crate::streaming_request_hook::UsageState,
     ) {
-        self.seed_scratchpad_request_input(query, &chat_history);
+        let query = query.into();
+        self.seed_scratchpad_request_input(&query, &chat_history);
         let (stream, cancel_tx, usage_state) = self
             .inner
             .stream_chat_with_timeout(
@@ -1505,19 +1512,30 @@ impl Agent {
     /// No-op when scratchpad isn't wired up. `Debug` formatting on history
     /// over-counts vs. per-provider serialization — conservative direction
     /// for budget gating, and `set_estimated_used` corrects from LLM ground
-    /// truth after each turn anyway.
+    /// truth after each turn anyway. Messages carrying images are counted by
+    /// their text parts only: a base64 payload is not text the model
+    /// tokenizes, and image tokens land via the same ground-truth correction.
     fn seed_scratchpad_request_input(
         &self,
-        query: &str,
+        query: &rig::completion::Message,
         chat_history: &[rig::completion::Message],
     ) {
         let Some(budget) = &self.scratchpad_budget else {
             return;
         };
-        let query_tokens = budget.count_tokens(query);
+        let query_tokens = budget.count_tokens(&crate::streaming::message_text(query));
         let history_tokens: usize = chat_history
             .iter()
-            .map(|m| budget.count_tokens(&format!("{m:?}")))
+            .map(|m| match m {
+                rig::completion::Message::User { content }
+                    if content
+                        .iter()
+                        .any(|c| matches!(c, rig::message::UserContent::Image(_))) =>
+                {
+                    budget.count_tokens(&crate::streaming::message_text(m))
+                }
+                _ => budget.count_tokens(&format!("{m:?}")),
+            })
             .sum();
         budget.record_usage(query_tokens + history_tokens);
     }
@@ -1680,7 +1698,7 @@ impl StreamingAgent for Agent {
 
     async fn stream(
         &self,
-        query: &str,
+        query: rig::completion::Message,
         chat_history: Vec<rig::completion::Message>,
         _cancel_token: CancellationToken,
         request_id: &str,
@@ -1700,7 +1718,7 @@ impl StreamingAgent for Agent {
 
     async fn stream_with_timeout(
         &self,
-        query: &str,
+        query: rig::completion::Message,
         chat_history: Vec<rig::completion::Message>,
         timeout: Duration,
         request_id: &str,

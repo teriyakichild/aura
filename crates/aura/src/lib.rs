@@ -75,12 +75,15 @@ pub use provider_agent::{
     ToolCall, ToolResult,
 };
 pub use rig::completion::{Message, ToolDefinition as RigToolDefinition};
-pub use rig::message::{AssistantContent, ToolCall as RigToolCall, ToolResultContent, UserContent};
+pub use rig::message::{
+    AssistantContent, DocumentSourceKind, ImageDetail, ImageMediaType, MimeType,
+    ToolCall as RigToolCall, ToolResultContent, UserContent,
+};
 pub use rig::one_or_many::OneOrMany;
 pub use rig::tool::{Tool as RigTool, ToolDyn};
 pub use rig_builder::{RigBuilder, resolve_mcp_headers_in};
 pub use scratchpad::{ScratchpadConfig, ScratchpadToolEntry};
-pub use streaming::StreamingAgent;
+pub use streaming::{StreamingAgent, message_text};
 
 // Legacy aliases (deprecated)
 #[deprecated(since = "1.2.0", note = "use StreamedAssistantContent instead")]

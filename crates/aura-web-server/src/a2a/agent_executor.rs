@@ -262,7 +262,7 @@ impl AgentExecutor for AuraAgentExecutor {
                 request_id: request_id.clone(),
             });
 
-            let mut stream = match agent.stream(&text, history, cancel_token.clone(), &request_id).await {
+            let mut stream = match agent.stream(text.into(), history, cancel_token.clone(), &request_id).await {
                 Ok(s) => s,
                 Err(e) => {
                     yield Ok(fail_status(&task_id, &context_id, &e.to_string()));

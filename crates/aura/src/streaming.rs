@@ -18,7 +18,7 @@
 //!
 //! async fn handle_request(agent: impl StreamingAgent, query: &str) {
 //!     let cancel_token = CancellationToken::new();
-//!     let stream = agent.stream(query, vec![], cancel_token, "req_123").await?;
+//!     let stream = agent.stream(query.into(), vec![], cancel_token, "req_123").await?;
 //!
 //!     // Process stream items (convert to SSE, etc.)
 //!     while let Some(item) = stream.next().await {
@@ -38,6 +38,28 @@ use futures::stream::BoxStream;
 use rig::completion::Message;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+/// Text carried by a message, with non-text parts (images, tool calls, tool
+/// results) omitted. Multiple text parts are joined with newlines.
+pub fn message_text(message: &Message) -> String {
+    let parts: Vec<&str> = match message {
+        Message::User { content } => content
+            .iter()
+            .filter_map(|c| match c {
+                rig::message::UserContent::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect(),
+        Message::Assistant { content, .. } => content
+            .iter()
+            .filter_map(|c| match c {
+                rig::message::AssistantContent::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect(),
+    };
+    parts.join("\n")
+}
 
 /// Trait for agents that produce streaming completions.
 ///
@@ -73,7 +95,7 @@ pub trait StreamingAgent: Send + Sync {
     ///
     /// # Arguments
     ///
-    /// * `query` - The user's query/message
+    /// * `query` - The user's message for this turn (text and/or image parts)
     /// * `chat_history` - Previous messages in the conversation
     /// * `cancel_token` - Token for cancellation (e.g., on client disconnect)
     /// * `request_id` - HTTP request ID for MCP progress routing and tool correlation
@@ -83,7 +105,7 @@ pub trait StreamingAgent: Send + Sync {
     /// A boxed stream of `StreamItem` results, or an error if streaming cannot start.
     async fn stream(
         &self,
-        query: &str,
+        query: Message,
         chat_history: Vec<Message>,
         cancel_token: CancellationToken,
         request_id: &str,
@@ -96,7 +118,7 @@ pub trait StreamingAgent: Send + Sync {
     ///
     /// # Arguments
     ///
-    /// * `query` - The user's query/message
+    /// * `query` - The user's message for this turn (text and/or image parts)
     /// * `chat_history` - Previous messages in the conversation
     /// * `timeout` - Maximum duration for the entire stream
     /// * `request_id` - Request ID for MCP cancellation correlation
@@ -108,7 +130,7 @@ pub trait StreamingAgent: Send + Sync {
     /// tracks token consumption via Rig hooks.
     async fn stream_with_timeout(
         &self,
-        query: &str,
+        query: Message,
         chat_history: Vec<Message>,
         timeout: Duration,
         request_id: &str,
@@ -148,5 +170,35 @@ pub trait StreamingAgent: Send + Sync {
     /// phase, so there is nothing to report at the agent level.
     fn system_prompt(&self) -> Option<&str> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rig::message::{ImageMediaType, UserContent};
+    use rig::one_or_many::OneOrMany;
+
+    #[test]
+    fn message_text_joins_text_parts_and_skips_images() {
+        let message = Message::User {
+            content: OneOrMany::many(vec![
+                UserContent::text("first"),
+                UserContent::image_base64("AAAA", Some(ImageMediaType::PNG), None),
+                UserContent::text("second"),
+            ])
+            .unwrap(),
+        };
+        assert_eq!(message_text(&message), "first\nsecond");
+
+        let image_only = Message::User {
+            content: OneOrMany::one(UserContent::image_base64(
+                "AAAA",
+                Some(ImageMediaType::PNG),
+                None,
+            )),
+        };
+        assert_eq!(message_text(&image_only), "");
+        assert_eq!(message_text(&Message::assistant("reply")), "reply");
     }
 }

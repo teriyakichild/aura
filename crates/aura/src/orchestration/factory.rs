@@ -44,7 +44,7 @@ impl OrchestratorFactory {
     /// state since its trait-visible callers don't observe usage.
     fn spawn_orchestration_stream(
         &self,
-        query: String,
+        query: rig::completion::Message,
         chat_history: Vec<rig::completion::Message>,
         cancel_token: CancellationToken,
         request_id: String,
@@ -156,7 +156,7 @@ impl StreamingAgent for OrchestratorFactory {
 
     async fn stream(
         &self,
-        query: &str,
+        query: rig::completion::Message,
         chat_history: Vec<rig::completion::Message>,
         cancel_token: CancellationToken,
         request_id: &str,
@@ -164,7 +164,7 @@ impl StreamingAgent for OrchestratorFactory {
         // Raw-stream callers don't observe usage; hand the spawn a detached
         // UsageState so the field is populated but nobody reads it.
         Ok(self.spawn_orchestration_stream(
-            query.to_string(),
+            query,
             chat_history,
             cancel_token,
             request_id.to_string(),
@@ -175,7 +175,7 @@ impl StreamingAgent for OrchestratorFactory {
 
     async fn stream_with_timeout(
         &self,
-        query: &str,
+        query: rig::completion::Message,
         chat_history: Vec<rig::completion::Message>,
         timeout: Duration,
         request_id: &str,
@@ -198,7 +198,7 @@ impl StreamingAgent for OrchestratorFactory {
         // all orchestration LLM turns.
         let usage_state = crate::UsageState::new();
         let stream = self.spawn_orchestration_stream(
-            query.to_string(),
+            query,
             chat_history,
             cancel_token,
             request_id.to_string(),

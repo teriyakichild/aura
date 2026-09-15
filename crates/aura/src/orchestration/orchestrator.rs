@@ -443,6 +443,8 @@ struct StreamContext<'a> {
 /// variant needs regardless of ReAct depth or reasoning attribution mode.
 struct StreamCallParams<'a> {
     prompt: &'a str,
+    /// Image parts sent in the same user turn as `prompt`.
+    attachments: &'a [rig::message::UserContent],
     history: Vec<rig::completion::Message>,
     phase: &'a str,
     event_tx: Option<&'a tokio::sync::mpsc::Sender<Result<StreamItem, StreamError>>>,
@@ -453,6 +455,31 @@ struct StreamCallParams<'a> {
 /// matching the single-agent id so clients key context pressure the same way
 /// in both modes.
 const COORDINATOR_AGENT_ID: &str = "main";
+
+/// The user turn for a prompt: plain text, or text followed by the
+/// attachments when there are any.
+fn prompt_message(
+    prompt: &str,
+    attachments: &[rig::message::UserContent],
+) -> rig::completion::Message {
+    let mut content = rig::OneOrMany::one(rig::message::UserContent::text(prompt));
+    for attachment in attachments {
+        content.push(attachment.clone());
+    }
+    rig::completion::Message::User { content }
+}
+
+/// The image parts of a user message.
+fn image_parts(message: &rig::completion::Message) -> Vec<rig::message::UserContent> {
+    match message {
+        rig::completion::Message::User { content } => content
+            .iter()
+            .filter(|part| matches!(part, rig::message::UserContent::Image(_)))
+            .cloned()
+            .collect(),
+        rig::completion::Message::Assistant { .. } => Vec::new(),
+    }
+}
 
 /// Every exit path of a stream loop must route its turns through
 /// [`TurnTally::record`]: a turn counted locally but not into the shared
@@ -1392,11 +1419,13 @@ impl Orchestrator {
     ) -> Result<ForwardedRun, Box<dyn std::error::Error + Send + Sync>> {
         let StreamCallParams {
             prompt,
+            attachments,
             history,
             phase,
             event_tx,
             ..
         } = params;
+        let prompt = prompt_message(prompt, attachments);
         let timeout_secs = self.config.per_call_timeout_secs();
         let stream_future = async {
             let stream = match park_key {
@@ -1473,11 +1502,13 @@ impl Orchestrator {
 
         let StreamCallParams {
             prompt,
+            attachments,
             history,
             phase,
             event_tx,
             context_agent,
         } = params;
+        let prompt = prompt_message(prompt, attachments);
         let timeout_secs = self.config.per_call_timeout_secs();
         let inactivity_secs = self.config.stream_inactivity_timeout_secs();
         let emit_scratchpad_events = scratchpad::emit_scratchpad_tool_events_enabled();
@@ -1766,6 +1797,7 @@ impl Orchestrator {
                     agent,
                     StreamCallParams {
                         prompt: params.prompt,
+                        attachments: params.attachments,
                         history: params.history.clone(),
                         phase: params.phase,
                         event_tx: params.event_tx,
@@ -1837,6 +1869,7 @@ impl Orchestrator {
     ///
     /// Enforces config flags: converts Direct/Clarification to single-task
     /// Orchestrated when `allow_direct_answers`/`allow_clarification` is false.
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(
         name = "orchestration.planning",
         skip_all,
@@ -1845,6 +1878,7 @@ impl Orchestrator {
     async fn plan_with_routing(
         &self,
         query: &str,
+        attachments: &[rig::message::UserContent],
         chat_history: &[rig::completion::Message],
         coordinator_state: &mut CoordinatorState,
         previous: Option<&IterationContext>,
@@ -1888,6 +1922,11 @@ impl Orchestrator {
         for attempt in 1..=max_correction_attempts {
             let attempt_start = Instant::now();
             let prompt = current_prompt.clone();
+            // The first attempt's user turn joins the coordinator conversation
+            // below, so correction attempts already have the attachments in
+            // history and must not send them again.
+            let attachments: &[rig::message::UserContent] =
+                if attempt == 1 { attachments } else { &[] };
 
             tracing::info!(
                 "Planning attempt {}/{} (per_call_timeout={}s, conversation_len={})",
@@ -1906,6 +1945,7 @@ impl Orchestrator {
                     &coordinator_state.agent,
                     &StreamCallParams {
                         prompt: &prompt,
+                        attachments,
                         history: full_history,
                         phase: "Planning",
                         event_tx,
@@ -1943,7 +1983,7 @@ impl Orchestrator {
                     let err_str = e.to_string();
                     coordinator_state
                         .conversation
-                        .push(rig::completion::Message::user(&prompt));
+                        .push(prompt_message(&prompt, attachments));
                     tracing::warn!(
                         "Planning attempt {} failed after {:.1}s: {}",
                         attempt,
@@ -1957,7 +1997,7 @@ impl Orchestrator {
             // Grow conversation: user turn
             coordinator_state
                 .conversation
-                .push(rig::completion::Message::user(&prompt));
+                .push(prompt_message(&prompt, attachments));
 
             // Check if a routing tool was called
             let decision = coordinator_state.routing_decision.lock().await.take();
@@ -3736,6 +3776,7 @@ Assign tasks to the worker whose tools best match the required operations."#,
                     &worker,
                     StreamCallParams {
                         prompt: &prompt,
+                        attachments: &[],
                         history,
                         phase: "Worker task",
                         event_tx,
@@ -4410,10 +4451,17 @@ Assign tasks to the worker whose tools best match the required operations."#,
     )]
     pub(super) async fn run_orchestration(
         &self,
-        query: &str,
+        query: &rig::completion::Message,
         chat_history: Vec<rig::completion::Message>,
         event_tx: tokio::sync::mpsc::Sender<Result<StreamItem, StreamError>>,
     ) -> Result<String, StreamError> {
+        // Only the coordinator sees the query's images, on the request's first
+        // planning call; that turn stays in its conversation for later cycles.
+        // Workers get the coordinator's text tasks, and every other consumer of
+        // the query (goals, manifests, spans) reads its text.
+        let attachments = image_parts(query);
+        let query_text = crate::streaming::message_text(query);
+        let query = query_text.as_str();
         let span = tracing::Span::current();
         let (goal_preview, _) = safe_truncate(query, 200);
         span.record("orchestration.goal", goal_preview);
@@ -4457,6 +4505,7 @@ Assign tasks to the worker whose tools best match the required operations."#,
         let (response, _prompt, _coordinator_text) = self
             .plan_with_routing(
                 query,
+                &attachments,
                 &chat_history,
                 &mut coordinator_state,
                 None,
@@ -4862,6 +4911,7 @@ Assign tasks to the worker whose tools best match the required operations."#,
         let routing = self
             .plan_with_routing(
                 query,
+                &[],
                 chat_history,
                 coordinator_state,
                 Some(&post_execute_ctx),
@@ -5937,6 +5987,36 @@ mod tests {
         assert_eq!(run.response.usage.input_tokens, 4164);
         assert_eq!(run.response.usage.output_tokens, 239);
         assert_eq!(usage_state.get_final_usage(), (4164, 239, 4403));
+    }
+
+    #[test]
+    fn prompt_message_attaches_images_after_the_text() {
+        use rig::message::{ImageMediaType, UserContent};
+
+        let plain = prompt_message("plan this", &[]);
+        assert_eq!(plain, rig::completion::Message::user("plan this"));
+
+        let image = UserContent::image_base64("AAAA", Some(ImageMediaType::PNG), None);
+        let with_image = prompt_message("plan this", std::slice::from_ref(&image));
+        let rig::completion::Message::User { content } = &with_image else {
+            panic!("prompt is a user message");
+        };
+        let parts: Vec<_> = content.iter().collect();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], &UserContent::text("plan this"));
+        assert_eq!(parts[1], &image);
+        assert_eq!(crate::streaming::message_text(&with_image), "plan this");
+    }
+
+    #[test]
+    fn image_parts_keeps_only_images() {
+        use rig::message::{ImageMediaType, UserContent};
+
+        let image = UserContent::image_base64("AAAA", Some(ImageMediaType::PNG), None);
+        let query = prompt_message("what is this?", std::slice::from_ref(&image));
+        assert_eq!(image_parts(&query), vec![image]);
+        assert!(image_parts(&rig::completion::Message::user("text only")).is_empty());
+        assert!(image_parts(&rig::completion::Message::assistant("reply")).is_empty());
     }
 
     #[test]

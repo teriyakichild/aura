@@ -392,7 +392,7 @@ impl DirectBackend {
             model: selected,
             messages: vec![ChatMessage {
                 role: Role::User,
-                content: Some(prompt),
+                content: Some(prompt.into()),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -477,7 +477,7 @@ fn convert_cli_message(m: &Message) -> ChatMessage {
         .map(|calls| calls.iter().map(convert_cli_tool_call).collect());
     ChatMessage {
         role,
-        content: m.content.clone(),
+        content: m.content.clone().map(Into::into),
         tool_calls,
         tool_call_id: m.tool_call_id.clone(),
         name: m.name.clone(),
@@ -912,7 +912,13 @@ preamble = "p"
         let req = DirectBackend::build_chat_request(&msgs, None, None);
         assert_eq!(req.messages[0].role, Role::Tool);
         assert_eq!(req.messages[0].tool_call_id.as_deref(), Some("call_1"));
-        assert_eq!(req.messages[0].content.as_deref(), Some("content"));
+        assert_eq!(
+            req.messages[0]
+                .content
+                .as_ref()
+                .map(|c| c.text().into_owned()),
+            Some("content".to_string())
+        );
     }
 
     #[test]

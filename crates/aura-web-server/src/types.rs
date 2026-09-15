@@ -148,7 +148,7 @@ impl std::fmt::Display for Role {
 pub struct ChatMessage {
     pub role: Role,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<MessageContent>,
     /// Tool calls emitted by an assistant message. Used when reconstructing
     /// conversation history for client-side tool follow-ups.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,6 +160,99 @@ pub struct ChatMessage {
     /// required for correlation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+}
+
+/// Message content in either OpenAI wire shape: a plain string, or an array
+/// of typed parts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+impl MessageContent {
+    /// The textual view of the content: the string itself, or the text parts
+    /// joined with newlines (image parts contribute nothing).
+    pub fn text(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::Text(text) => std::borrow::Cow::Borrowed(text),
+            Self::Parts(parts) => std::borrow::Cow::Owned(
+                parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text { text } => Some(text.as_str()),
+                        ContentPart::ImageUrl { .. } => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+        }
+    }
+}
+
+impl From<String> for MessageContent {
+    fn from(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl From<&str> for MessageContent {
+    fn from(text: &str) -> Self {
+        Self::Text(text.to_owned())
+    }
+}
+
+/// One element of an array-shaped message `content` (OpenAI shape).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrl },
+}
+
+/// An `image_url` content part: a `data:` URL carrying base64 image bytes.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImageUrl {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<ImageDetail>,
+}
+
+/// Elides the payload of a `data:` URL so a `{:?}` of a request never dumps
+/// base64 into logs or spans.
+impl std::fmt::Debug for ImageUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let url: std::borrow::Cow<'_, str> = match self.url.split_once(',') {
+            Some((head, payload)) if head.starts_with("data:") => {
+                format!("{head},<{} bytes elided>", payload.len()).into()
+            }
+            _ => self.url.as_str().into(),
+        };
+        f.debug_struct("ImageUrl")
+            .field("url", &url)
+            .field("detail", &self.detail)
+            .finish()
+    }
+}
+
+/// Requested image fidelity (OpenAI `detail`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageDetail {
+    Low,
+    High,
+    Auto,
+}
+
+impl From<ImageDetail> for aura::ImageDetail {
+    fn from(detail: ImageDetail) -> Self {
+        match detail {
+            ImageDetail::Low => Self::Low,
+            ImageDetail::High => Self::High,
+            ImageDetail::Auto => Self::Auto,
+        }
+    }
 }
 
 /// A tool call emitted by an assistant message (OpenAI shape).
@@ -426,5 +519,81 @@ mod tests {
         assert_eq!(json["error"]["type"], "invalid_request_error");
         assert_eq!(json["error"]["param"], "model");
         assert_eq!(json["error"]["code"], "model_not_found");
+    }
+
+    #[test]
+    fn message_content_accepts_string_and_parts() {
+        let string: ChatMessage = serde_json::from_value(serde_json::json!({
+            "role": "user", "content": "hi"
+        }))
+        .unwrap();
+        assert_eq!(string.content, Some(MessageContent::Text("hi".into())));
+
+        let parts: ChatMessage = serde_json::from_value(serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "what is this?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA", "detail": "low"}}
+            ]
+        }))
+        .unwrap();
+        let content = parts.content.unwrap();
+        assert_eq!(content.text(), "what is this?");
+        assert_eq!(
+            content,
+            MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "what is this?".into()
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "data:image/png;base64,AAAA".into(),
+                        detail: Some(ImageDetail::Low),
+                    }
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn message_content_rejects_unknown_part_types_and_details() {
+        let audio = serde_json::from_value::<ChatMessage>(serde_json::json!({
+            "role": "user",
+            "content": [{"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}}]
+        }));
+        assert!(audio.is_err());
+
+        let detail = serde_json::from_value::<ChatMessage>(serde_json::json!({
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": "https://x/y.png", "detail": "ultra"}}]
+        }));
+        assert!(detail.is_err());
+    }
+
+    #[test]
+    fn string_content_serializes_as_a_plain_string() {
+        let msg = ChatMessage {
+            role: Role::User,
+            content: Some("hi".into()),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["content"], serde_json::json!("hi"));
+    }
+
+    #[test]
+    fn image_url_debug_elides_data_payload() {
+        let image = ImageUrl {
+            url: "data:image/png;base64,iVBORw0KGgo".into(),
+            detail: None,
+        };
+        let debug = format!("{image:?}");
+        assert!(!debug.contains("iVBOR"), "{debug}");
+        assert!(
+            debug.contains("data:image/png;base64,<11 bytes elided>"),
+            "{debug}"
+        );
     }
 }

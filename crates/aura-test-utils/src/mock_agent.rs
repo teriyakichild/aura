@@ -173,7 +173,7 @@ impl StreamingAgent for MockAgent {
 
     async fn stream(
         &self,
-        _query: &str,
+        _query: Message,
         _chat_history: Vec<Message>,
         _cancel_token: CancellationToken,
         request_id: &str,
@@ -183,7 +183,7 @@ impl StreamingAgent for MockAgent {
 
     async fn stream_with_timeout(
         &self,
-        _query: &str,
+        _query: Message,
         _chat_history: Vec<Message>,
         _timeout: Duration,
         request_id: &str,
@@ -211,7 +211,7 @@ mod tests {
     async fn a_pending_agent_never_yields() {
         let agent = MockAgent::pending();
         let mut stream = agent
-            .stream("q", vec![], CancellationToken::new(), "req_1")
+            .stream("q".into(), vec![], CancellationToken::new(), "req_1")
             .await
             .expect("mock stream should start");
         assert!(
@@ -236,12 +236,12 @@ mod tests {
 
             if entry_point == "stream" {
                 let _ = agent
-                    .stream("q", vec![], CancellationToken::new(), "req_1")
+                    .stream("q".into(), vec![], CancellationToken::new(), "req_1")
                     .await
                     .expect("mock stream should start");
             } else {
                 let _ = agent
-                    .stream_with_timeout("q", vec![], Duration::from_secs(1), "req_1")
+                    .stream_with_timeout("q".into(), vec![], Duration::from_secs(1), "req_1")
                     .await;
             }
 
@@ -256,7 +256,7 @@ mod tests {
     async fn a_yielding_agent_produces_its_items_then_ends() {
         let agent = MockAgent::yielding([items::text("hello "), items::text("world")]);
         let stream = agent
-            .stream("q", vec![], CancellationToken::new(), "req_1")
+            .stream("q".into(), vec![], CancellationToken::new(), "req_1")
             .await
             .expect("mock stream should start");
 
@@ -290,7 +290,7 @@ mod tests {
         ]);
 
         let stream = agent
-            .stream("q", vec![], CancellationToken::new(), "req_42")
+            .stream("q".into(), vec![], CancellationToken::new(), "req_42")
             .await
             .expect("mock stream should start");
         let items: Vec<_> = stream.collect().await;
@@ -304,13 +304,13 @@ mod tests {
         let agent = MockAgent::yielding([items::text("once")]);
 
         let first: Vec<_> = agent
-            .stream("q", vec![], CancellationToken::new(), "req_1")
+            .stream("q".into(), vec![], CancellationToken::new(), "req_1")
             .await
             .expect("mock stream should start")
             .collect()
             .await;
         let second: Vec<_> = agent
-            .stream("q", vec![], CancellationToken::new(), "req_1")
+            .stream("q".into(), vec![], CancellationToken::new(), "req_1")
             .await
             .expect("mock stream should start")
             .collect()
@@ -337,7 +337,7 @@ mod tests {
         ]);
 
         let mut stream = agent
-            .stream("q", vec![], CancellationToken::new(), "req_1")
+            .stream("q".into(), vec![], CancellationToken::new(), "req_1")
             .await
             .expect("mock stream should start");
         while stream.next().await.is_some() {
