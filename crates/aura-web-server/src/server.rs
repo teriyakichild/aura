@@ -141,6 +141,12 @@ pub struct ServerArgs {
     #[arg(long, env = "SHUTDOWN_TIMEOUT_SECS", default_value = "30")]
     pub shutdown_timeout_secs: u64,
 
+    /// Maximum accepted request body size in bytes. Requests above it are
+    /// rejected with 413. Sized for vision input: ten camera frames as base64
+    /// image parts run 3-4 MB, and OpenAI caps image requests at 20 MB.
+    #[arg(long, env = "MAX_REQUEST_BODY_BYTES", default_value = "20971520")]
+    pub max_request_body_bytes: usize,
+
     /// Default agent name or alias, used when `model` is omitted from the request.
     /// Not required when only one configuration is loaded via CONFIG_PATH.
     #[arg(long, env = "DEFAULT_AGENT")]
@@ -469,6 +475,9 @@ async fn run(args: ServerArgs) -> std::io::Result<()> {
         .layer(axum::extract::Extension(handlers::IngressHmac(
             ingress_hmac,
         )))
+        .layer(axum::extract::DefaultBodyLimit::max(
+            args.max_request_body_bytes,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
