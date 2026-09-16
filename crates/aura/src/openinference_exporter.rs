@@ -519,23 +519,59 @@ fn parse_message(value: &serde_json::Value) -> Option<ParsedMessage> {
 }
 
 /// Extract text from a message content field — either a plain string or a
-/// Rig-style `[{"type":"text","text":"..."}]` content-parts array.
+/// Rig-style `[{"type":"text","text":"..."}]` content-parts array. Image
+/// parts become a marker (see [`image_part_marker`]) so the trace shows the
+/// picture was sent without carrying its payload.
 fn parse_message_content(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(content) => Some(content.clone()),
         serde_json::Value::Array(parts) => {
-            let text_parts: Vec<&str> = parts
+            let rendered: Vec<String> = parts
                 .iter()
-                .filter_map(|part| {
-                    (part.get("type").and_then(|value| value.as_str()) == Some("text"))
-                        .then(|| part.get("text").and_then(|value| value.as_str()))
-                        .flatten()
-                })
+                .filter_map(
+                    |part| match part.get("type").and_then(serde_json::Value::as_str) {
+                        Some("text") => part
+                            .get("text")
+                            .and_then(serde_json::Value::as_str)
+                            .map(ToOwned::to_owned),
+                        Some("image") => Some(image_part_marker(part)),
+                        _ => None,
+                    },
+                )
                 .collect();
-            (!text_parts.is_empty()).then(|| text_parts.join("\n\n"))
+            (!rendered.is_empty()).then(|| rendered.join("\n\n"))
         }
         _ => None,
     }
+}
+
+/// Render a Rig image part as `[image <mime> <source> detail=<level>]`,
+/// the same marker `aura::message_for_trace` uses for the request span.
+/// Rig serializes the part as `{"type":"image","data":{"type":"base64",
+/// "value":"..."},"media_type":"jpeg","detail":"low"}`.
+fn image_part_marker(part: &serde_json::Value) -> String {
+    let media = match part.get("media_type").and_then(serde_json::Value::as_str) {
+        Some("svg") => "image/svg+xml".to_owned(),
+        Some(kind) => format!("image/{kind}"),
+        None => "image".to_owned(),
+    };
+    let source = match (
+        part.pointer("/data/type")
+            .and_then(serde_json::Value::as_str),
+        part.pointer("/data/value"),
+    ) {
+        (Some("base64"), Some(serde_json::Value::String(data))) => {
+            format!("base64 {} bytes", data.len())
+        }
+        (Some("url"), Some(serde_json::Value::String(url))) => format!("url {url}"),
+        (Some(kind), _) => kind.to_owned(),
+        (None, _) => "unknown source".to_owned(),
+    };
+    let detail = part
+        .get("detail")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("auto");
+    format!("[image {media} {source} detail={detail}]")
 }
 
 // ---------------------------------------------------------------------------
@@ -871,6 +907,36 @@ mod tests {
                 .to_string(),
             prompt
         );
+    }
+
+    #[test]
+    fn test_agent_turn_image_parts_become_markers_in_input_value() {
+        let message = rig::completion::Message::User {
+            content: rig::OneOrMany::many(vec![
+                rig::message::UserContent::text("what is this?"),
+                rig::message::UserContent::image_base64(
+                    "AAAABBBB",
+                    Some(rig::message::ImageMediaType::JPEG),
+                    Some(rig::message::ImageDetail::Low),
+                ),
+            ])
+            .unwrap(),
+        };
+        let rig_message = serde_json::to_string(&message).unwrap();
+        assert!(rig_message.contains("AAAABBBB"));
+
+        let span = make_span(
+            "agent.turn",
+            vec![KeyValue::new("gen_ai.turn.prompt", rig_message)],
+        );
+        let result = transform_span(span);
+
+        let input = find_attr(&result, "input.value").unwrap().to_string();
+        assert_eq!(
+            input,
+            "what is this?\n\n[image image/jpeg base64 8 bytes detail=low]"
+        );
+        assert!(!input.contains("AAAABBBB"));
     }
 
     #[test]

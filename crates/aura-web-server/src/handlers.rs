@@ -501,7 +501,7 @@ pub fn build_completion_config(
         active_requests: data.active_requests.clone(),
         provider,
         model,
-        query_for_otel: aura::message_text(&setup.query),
+        query_for_otel: aura::message_for_trace(&setup.query),
         message_count,
         response_content,
         pending_approvals: data.pending_approvals.clone(),

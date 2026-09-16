@@ -173,6 +173,46 @@ pub trait StreamingAgent: Send + Sync {
     }
 }
 
+/// The message as a span attribute: text parts verbatim, each image part
+/// replaced by a marker such as `[image image/jpeg base64 123456 bytes
+/// detail=low]` so a trace shows that a picture was sent without carrying
+/// the payload. Non-user messages project like [`message_text`].
+pub fn message_for_trace(message: &Message) -> String {
+    let Message::User { content } = message else {
+        return message_text(message);
+    };
+    let parts: Vec<String> = content
+        .iter()
+        .filter_map(|c| match c {
+            rig::message::UserContent::Text(t) => Some(t.text.clone()),
+            rig::message::UserContent::Image(image) => Some(image_marker(image)),
+            _ => None,
+        })
+        .collect();
+    parts.join("\n")
+}
+
+fn image_marker(image: &rig::message::Image) -> String {
+    use rig::message::{DocumentSourceKind, ImageDetail, MimeType};
+    let media = image
+        .media_type
+        .as_ref()
+        .map_or("image", MimeType::to_mime_type);
+    let source = match &image.data {
+        DocumentSourceKind::Base64(data) => format!("base64 {} bytes", data.len()),
+        DocumentSourceKind::Url(url) => format!("url {url}"),
+        DocumentSourceKind::Raw(bytes) => format!("raw {} bytes", bytes.len()),
+        DocumentSourceKind::String(text) => format!("string {} bytes", text.len()),
+        other => other.to_string(),
+    };
+    let detail = match image.detail.as_ref() {
+        Some(ImageDetail::Low) => "low",
+        Some(ImageDetail::High) => "high",
+        Some(ImageDetail::Auto) | None => "auto",
+    };
+    format!("[image {media} {source} detail={detail}]")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,5 +240,25 @@ mod tests {
         };
         assert_eq!(message_text(&image_only), "");
         assert_eq!(message_text(&Message::assistant("reply")), "reply");
+    }
+
+    #[test]
+    fn message_for_trace_marks_images_without_their_payload() {
+        let message = Message::User {
+            content: OneOrMany::many(vec![
+                UserContent::text("what is this?"),
+                UserContent::image_base64(
+                    "AAAABBBB",
+                    Some(ImageMediaType::JPEG),
+                    Some(rig::message::ImageDetail::Low),
+                ),
+            ])
+            .unwrap(),
+        };
+        assert_eq!(
+            message_for_trace(&message),
+            "what is this?\n[image image/jpeg base64 8 bytes detail=low]"
+        );
+        assert_eq!(message_for_trace(&Message::assistant("reply")), "reply");
     }
 }

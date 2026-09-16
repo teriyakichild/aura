@@ -83,7 +83,7 @@ pub use rig::one_or_many::OneOrMany;
 pub use rig::tool::{Tool as RigTool, ToolDyn};
 pub use rig_builder::{RigBuilder, resolve_mcp_headers_in};
 pub use scratchpad::{ScratchpadConfig, ScratchpadToolEntry};
-pub use streaming::{StreamingAgent, message_text};
+pub use streaming::{StreamingAgent, message_for_trace, message_text};
 
 // Legacy aliases (deprecated)
 #[deprecated(since = "1.2.0", note = "use StreamedAssistantContent instead")]

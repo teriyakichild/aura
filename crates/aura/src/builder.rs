@@ -1192,7 +1192,7 @@ impl Agent {
             &span,
             self.inner.provider_name(),
             &self.model,
-            &crate::streaming::message_text(&query),
+            &crate::streaming::message_for_trace(&query),
             &self.system_prompt,
         );
         self.record_llm_call_attributes(&span);
@@ -1219,7 +1219,7 @@ impl Agent {
             &span,
             self.inner.provider_name(),
             &self.model,
-            &crate::streaming::message_text(&query),
+            &crate::streaming::message_for_trace(&query),
             &self.system_prompt,
         );
         self.record_llm_call_attributes(&span);
