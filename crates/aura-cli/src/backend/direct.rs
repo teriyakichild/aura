@@ -29,7 +29,9 @@ use aura_web_server::types::{
 };
 
 use crate::api::stream::{StreamHandler, StreamResult, process_sse_events};
-use crate::api::types::{Message, ModelEntry, ToolCallInfo, ToolDefinition};
+use crate::api::types::{
+    ContentPart, ImageDetail, Message, MessageContent, ModelEntry, ToolCallInfo, ToolDefinition,
+};
 use crate::ui::prompt::get_selected_model;
 
 /// Factory for `additional_tools` registered on every standalone agent.
@@ -477,10 +479,38 @@ fn convert_cli_message(m: &Message) -> ChatMessage {
         .map(|calls| calls.iter().map(convert_cli_tool_call).collect());
     ChatMessage {
         role,
-        content: m.content.clone().map(Into::into),
+        content: m.content.as_ref().map(convert_cli_content),
         tool_calls,
         tool_call_id: m.tool_call_id.clone(),
         name: m.name.clone(),
+    }
+}
+
+/// Map CLI message content to the web-server type of the same OpenAI wire
+/// shape, part by part.
+fn convert_cli_content(content: &MessageContent) -> aura_web_server::types::MessageContent {
+    use aura_web_server::types as web;
+
+    match content {
+        MessageContent::Text(text) => web::MessageContent::Text(text.clone()),
+        MessageContent::Parts(parts) => web::MessageContent::Parts(
+            parts
+                .iter()
+                .map(|part| match part {
+                    ContentPart::Text { text } => web::ContentPart::Text { text: text.clone() },
+                    ContentPart::ImageUrl { image_url } => web::ContentPart::ImageUrl {
+                        image_url: web::ImageUrl {
+                            url: image_url.url.clone(),
+                            detail: image_url.detail.map(|detail| match detail {
+                                ImageDetail::Low => web::ImageDetail::Low,
+                                ImageDetail::High => web::ImageDetail::High,
+                                ImageDetail::Auto => web::ImageDetail::Auto,
+                            }),
+                        },
+                    },
+                })
+                .collect(),
+        ),
     }
 }
 
@@ -919,6 +949,33 @@ preamble = "p"
                 .map(|c| c.text().into_owned()),
             Some("content".to_string())
         );
+    }
+
+    #[test]
+    fn image_parts_reach_the_server_request() {
+        let msgs = vec![Message::user_with_images(
+            "what is this?",
+            vec![crate::api::types::ImageUrl {
+                url: "data:image/png;base64,AAAA".to_string(),
+                detail: Some(ImageDetail::Low),
+            }],
+        )];
+        let req = DirectBackend::build_chat_request(&msgs, None, None);
+        let Some(aura_web_server::types::MessageContent::Parts(parts)) = &req.messages[0].content
+        else {
+            panic!("expected content parts, got {:?}", req.messages[0].content);
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(
+            &parts[0],
+            aura_web_server::types::ContentPart::Text { text } if text == "what is this?"
+        ));
+        assert!(matches!(
+            &parts[1],
+            aura_web_server::types::ContentPart::ImageUrl { image_url }
+                if image_url.url == "data:image/png;base64,AAAA"
+                    && image_url.detail == Some(aura_web_server::types::ImageDetail::Low)
+        ));
     }
 
     #[test]

@@ -39,6 +39,8 @@ pub(crate) enum CommandOutcome {
     /// Pre-fill the next readline with this text (e.g. a resumed
     /// conversation's pending input).
     Reinject(String),
+    /// Send `String` as the next user message without another Enter.
+    Submit(String),
     /// Tear down and leave the REPL loop.
     Exit,
 }
@@ -178,6 +180,14 @@ pub(crate) const COMMANDS: &[Command] = &[
         mid_stream: MidStream::Live(crate::ui::mid_stream::live_style),
     },
     Command {
+        name: "/image",
+        description: "Attach a local image to the next message, or send one with it",
+        usage_hint: Some("<path> [message]"),
+        handler: cmd_image,
+        validate: None,
+        mid_stream: MidStream::Live(crate::ui::mid_stream::live_image),
+    },
+    Command {
         name: "/mcp",
         description: "List MCP servers, or set one up with `add`",
         usage_hint: Some("[add]"),
@@ -259,7 +269,12 @@ fn cmd_exit(ctx: &mut CommandContext, _args: &str) -> CommandOutcome {
 
 fn cmd_clear(ctx: &mut CommandContext, _args: &str) -> CommandOutcome {
     commands::handle_clear(ctx.conversation, ctx.conv_store, ctx.input_reader);
+    crate::ui::prompt::clear_pending_images();
     CommandOutcome::Handled
+}
+
+fn cmd_image(_ctx: &mut CommandContext, args: &str) -> CommandOutcome {
+    commands::handle_image(args)
 }
 
 fn cmd_help(_ctx: &mut CommandContext, _args: &str) -> CommandOutcome {

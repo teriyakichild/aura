@@ -227,6 +227,7 @@ aura [OPTIONS]
 | `--model <MODEL>`                          | `AURA_MODEL`                         | Model name (HTTP: starting model; standalone: selects agent by name/alias)                               |
 | `--system-prompt <PROMPT>`                 | —                                    | System prompt (HTTP: see note below; standalone: append/replace agent prompt)                            |
 | `--query <QUERY>`                          | —                                    | Run a single query and exit (one-shot mode)                                                              |
+| `--image <PATH>`                           | —                                    | Attach a local image (`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`) to the query, or to the first REPL message; repeatable |
 | `--resume <ID>`                            | —                                    | Resume a previous conversation by ID or prefix                                                           |
 | `--force`                                  | —                                    | Bypass warnings and non-critical errors (useful in one-shot/query mode)                                  |
 | `--enable-client-tools[=<bool>]`           | `AURA_ENABLE_CLIENT_TOOLS`           | Advertise CLI local tools to the model (default: disabled — see [Client-Side Tools](#client-side-tools)) |
@@ -328,7 +329,13 @@ This means typical pipe usage works without scrubbing:
 aura --query "summarize the README" > summary.md
 aura --query "list three ideas as JSON" | jq .
 aura --query "what's the version?" 2>/dev/null | tee log.txt
+aura --query "what is in this frame?" --image frame.jpg
 ```
+
+`--image <path>` attaches a local image to the query as an OpenAI
+`image_url` content part (base64 `data:` URL) so a vision-capable agent
+sees the picture. Repeat the flag for several images. A missing or
+unsupported file is an error before any request is sent.
 
 Exit code follows the standard contract: `0` ⇒ stdout is the complete
 response; non-zero ⇒ stderr explains why and stdout is empty.
@@ -352,6 +359,7 @@ Once inside the REPL, the slash commands below are available. All slash commands
 | `/conversations`   | List saved conversations                                            |
 | `/resume <filter>` | Resume a saved conversation by ID prefix or name                    |
 | `/rename <name>`   | Rename the current conversation                                     |
+| `/image <path> [message]` | Attach a local image to the next message, or send `message` with it right away; quote paths with spaces |
 | `/model <filter>`  | Browse and select a model (see [Model Selection](#model-selection)) |
 | `/style [name]`    | Switch visual style: `normal`, `high-contrast`, `no-colors`         |
 | `/mcp [add]`       | List the agent's MCP servers, or install one via a guided flow      |

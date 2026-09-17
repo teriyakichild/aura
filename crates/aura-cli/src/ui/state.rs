@@ -14,6 +14,7 @@ use std::time::Instant;
 
 use crossterm::style::Color;
 
+use crate::api::images::ImageAttachment;
 use crate::api::mcp_status::McpCounts;
 use crate::api::types::{DisplayEvent, ModelEntry};
 use crate::repl::registry::PendingCommand;
@@ -67,6 +68,8 @@ pub(crate) static CUMULATIVE_SCRATCHPAD_INTERCEPTED: Mutex<u64> = Mutex::new(0);
 pub(crate) static CUMULATIVE_SCRATCHPAD_EXTRACTED: Mutex<u64> = Mutex::new(0);
 pub(crate) static PROCESSING: AtomicBool = AtomicBool::new(false);
 pub(crate) static QUEUED_INPUT: Mutex<String> = Mutex::new(String::new());
+/// Images attached to the next user message.
+pub(crate) static PENDING_IMAGES: Mutex<Vec<ImageAttachment>> = Mutex::new(Vec::new());
 pub(crate) static QUEUED_WAVE_POS: Mutex<f32> = Mutex::new(0.0);
 pub(crate) static QUEUED_WAVE_DIR: Mutex<f32> = Mutex::new(0.5);
 
@@ -406,6 +409,39 @@ pub fn take_queued_input() -> String {
         .lock()
         .map(|mut g| std::mem::take(&mut *g))
         .unwrap_or_default()
+}
+
+/// Stage an image for the next user message; returns how many are staged.
+pub fn stage_image(image: ImageAttachment) -> usize {
+    PENDING_IMAGES
+        .lock()
+        .map(|mut g| {
+            g.push(image);
+            g.len()
+        })
+        .unwrap_or(0)
+}
+
+/// Consume every staged image.
+pub fn take_pending_images() -> Vec<ImageAttachment> {
+    PENDING_IMAGES
+        .lock()
+        .map(|mut g| std::mem::take(&mut *g))
+        .unwrap_or_default()
+}
+
+/// Put `images` back ahead of anything staged since they were taken.
+pub fn restore_pending_images(images: Vec<ImageAttachment>) {
+    if let Ok(mut g) = PENDING_IMAGES.lock() {
+        let staged_since = std::mem::replace(&mut *g, images);
+        g.extend(staged_since);
+    }
+}
+
+pub fn clear_pending_images() {
+    if let Ok(mut g) = PENDING_IMAGES.lock() {
+        g.clear();
+    }
 }
 
 /// Clear the queued input without returning it.

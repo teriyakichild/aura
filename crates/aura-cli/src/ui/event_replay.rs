@@ -82,6 +82,10 @@ pub fn replay_event_log_global() {
                 println!();
                 i += 1;
             }
+            DisplayEvent::UserImages(labels) => {
+                print_user_attachments(labels);
+                i += 1;
+            }
             DisplayEvent::ToolCall { .. } => {
                 let start = i;
                 while i < events.len() {
@@ -855,6 +859,20 @@ pub fn print_user_echo(input: &str) {
             .themed(AuraStyle::UserEchoFg)
             .on(theme().user_echo_bg),
     );
+}
+
+/// Print one muted line per attachment label directly under the user echo.
+pub fn print_user_attachments(labels: &[String]) {
+    for label in labels {
+        println!(
+            "{} {}",
+            "⎘".themed(AuraStyle::Connector),
+            format!("attached {label}").themed(AuraStyle::Muted),
+        );
+    }
+    if !labels.is_empty() {
+        println!();
+    }
 }
 
 // ---------------------------------------------------------------------------

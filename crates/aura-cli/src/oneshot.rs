@@ -95,7 +95,17 @@ pub fn run_oneshot(
 
     let mut conversation = ConversationHistory::new(config.system_prompt.as_deref());
 
-    conversation.add_user(&query);
+    // Attachments fail before any request goes out, so a bad path costs
+    // nothing and the error names the file on stderr in the one-shot
+    // `error:` format.
+    let images = match crate::api::images::load_all(&config.images) {
+        Ok(images) => images,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            std::process::exit(1);
+        }
+    };
+    conversation.add_user_with_images(&query, &images);
 
     // Build tool defs only when client tools are enabled. When disabled the
     // CLI sends no `tools` field; the model can't request local execution

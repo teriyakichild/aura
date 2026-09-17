@@ -270,6 +270,7 @@ dependencies = [
  "aura-events",
  "aura-telemetry",
  "aura-web-server",
+ "base64",
  "bytes",
  "clap",
  "crossterm",

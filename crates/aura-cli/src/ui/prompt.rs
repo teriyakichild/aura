@@ -9,15 +9,16 @@
 // Re-export from state.rs
 pub use super::state::{
     ACTIVE_ORCH_TOOLS, ORCH_SCROLLBACK_COUNTER, cache_anim_lines, capture_style_preview_original,
-    check_resize, clear_display_events, clear_queued_input, clear_style_preview_original,
-    extend_display_events, frame_lines, get_model_cache, get_model_matches, get_selected_model,
-    install_sigint_handler, is_expanded_output, is_pretty, is_processing, is_readline_active,
-    last_mid_stream_history_entry, print_welcome_state, print_welcome_state_animated,
-    push_display_event, push_mid_stream_history, random_bullet_color, reset_input_geometry,
-    reset_task_colors, restore_style_preview_original, set_expanded_output, set_mid_stream_history,
-    set_pretty, set_processing, set_queued_input, set_readline_active, set_selected_model,
-    set_startup_status, set_welcome_state, take_queued_input, task_color_for, term_size,
-    text_lines, with_event_log, with_event_log_mut,
+    check_resize, clear_display_events, clear_pending_images, clear_queued_input,
+    clear_style_preview_original, extend_display_events, frame_lines, get_model_cache,
+    get_model_matches, get_selected_model, install_sigint_handler, is_expanded_output, is_pretty,
+    is_processing, is_readline_active, last_mid_stream_history_entry, print_welcome_state,
+    print_welcome_state_animated, push_display_event, push_mid_stream_history, random_bullet_color,
+    reset_input_geometry, reset_task_colors, restore_pending_images,
+    restore_style_preview_original, set_expanded_output, set_mid_stream_history, set_pretty,
+    set_processing, set_queued_input, set_readline_active, set_selected_model, set_startup_status,
+    set_welcome_state, stage_image, take_pending_images, take_queued_input, task_color_for,
+    term_size, text_lines, with_event_log, with_event_log_mut,
 };
 pub(crate) use super::state::{lock_term, take_pending_command};
 
@@ -59,7 +60,7 @@ pub use super::stream_panel::{
 // Re-export from event_replay.rs
 pub use super::event_replay::{
     list_conversations, print_fields_tree, print_help, print_tool_call_expanded,
-    print_tool_call_summary, print_user_echo, replay_event_log_global,
+    print_tool_call_summary, print_user_attachments, print_user_echo, replay_event_log_global,
 };
 
 // Re-export from orchestrator.rs

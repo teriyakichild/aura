@@ -27,19 +27,20 @@ use crate::tools;
 use crate::ui::markdown::{render_markdown, render_summary};
 use crate::ui::prompt::{
     ContextWindowUsage, WaveAnimation, cleanup_terminal, clear_display_events, clear_input_hint,
-    drain_stdin, erase_input_frame, extend_display_events, frame_lines, fresh_context_fill_ratio,
-    fresh_context_window_usage, get_context_tokens, get_selected_model, handle_ctrlc,
-    install_sigint_handler, is_expanded_output, is_processing, is_readline_active,
+    clear_pending_images, drain_stdin, erase_input_frame, extend_display_events, frame_lines,
+    fresh_context_fill_ratio, fresh_context_window_usage, get_context_tokens, get_selected_model,
+    handle_ctrlc, install_sigint_handler, is_expanded_output, is_processing, is_readline_active,
     last_mid_stream_history_entry, load_and_restore_sse_events, lock_term,
     overwrite_orch_task_header_unlocked, prepare_input_line, print_fields_tree,
-    print_tool_call_expanded, print_user_echo, print_welcome_state_animated, push_display_event,
-    push_mid_stream_history, push_sse_event, random_bullet_color, record_session_event,
-    redraw_input_frame, replay_event_log_global, reset_ctrlc_state, reset_input_geometry,
-    restore_terminal_mode, seed_model_cache, set_context_window_usage, set_expanded_output,
-    set_mid_stream_history, set_mid_turn_context_estimate, set_noncanonical_noecho, set_processing,
-    set_readline_active, set_selected_model, set_startup_status, set_status_bar_tokens,
-    set_stream_conv_dir, set_welcome_state, setup_terminal, stop_and_clear_animation,
-    styled_prompt, take_pending_command, take_queued_input, task_color_for, text_lines,
+    print_tool_call_expanded, print_user_attachments, print_user_echo,
+    print_welcome_state_animated, push_display_event, push_mid_stream_history, push_sse_event,
+    random_bullet_color, record_session_event, redraw_input_frame, replay_event_log_global,
+    reset_ctrlc_state, reset_input_geometry, restore_pending_images, restore_terminal_mode,
+    seed_model_cache, set_context_window_usage, set_expanded_output, set_mid_stream_history,
+    set_mid_turn_context_estimate, set_noncanonical_noecho, set_processing, set_readline_active,
+    set_selected_model, set_startup_status, set_status_bar_tokens, set_stream_conv_dir,
+    set_welcome_state, setup_terminal, stop_and_clear_animation, styled_prompt,
+    take_pending_command, take_pending_images, take_queued_input, task_color_for, text_lines,
     update_status_bar, update_status_bar_unlocked, with_event_log, with_event_log_mut,
 };
 use crate::ui::welcome::WelcomeState;
@@ -637,6 +638,11 @@ pub fn run_repl(
 ) -> Result<()> {
     let mut conversation = ConversationHistory::new(config.system_prompt.as_deref());
 
+    // `--image` files ride on the first message; `/image` adds more later.
+    // Loaded before the terminal is touched so a bad path is a plain error.
+    clear_pending_images();
+    restore_pending_images(crate::api::images::load_all(&config.images)?);
+
     // Catch SIGINT so Ctrl-C works even when ISIG is unexpectedly enabled.
     install_sigint_handler();
 
@@ -868,12 +874,17 @@ pub fn run_repl(
                 push_mid_stream_history(input.clone());
 
                 if was_auto_submit {
-                    // Auto-submit: frame is already drawn, just erase and echo
+                    // Auto-submit: frame is already drawn, just erase it. A
+                    // command is echoed here because it never reaches the
+                    // message echo below; a message must not be, or it
+                    // would print twice.
                     let _ = execute!(io::stdout(), cursor::Hide);
                     erase_input_frame();
                     reset_input_geometry();
-                    print_user_echo(&input);
-                    println!();
+                    if input.starts_with('/') {
+                        print_user_echo(&input);
+                        println!();
+                    }
                 } else {
                     // After Enter, rustyline moved cursor one row below the text end
                     // (row = text_lines). Navigate to the frame's last input row
@@ -909,6 +920,11 @@ pub fn run_repl(
                         }
                         Some(CommandOutcome::Reinject(new_input)) => {
                             initial_input = new_input;
+                            continue;
+                        }
+                        Some(CommandOutcome::Submit(new_input)) => {
+                            initial_input = new_input;
+                            auto_submit = true;
                             continue;
                         }
                         Some(CommandOutcome::Handled) => continue,
@@ -949,10 +965,14 @@ pub fn run_repl(
                 telemetry.capture(aura_telemetry::events::ChatRequestStarted {});
 
                 // Append the compaction nudge to the user message if one is pending
+                let images = take_pending_images();
                 match compact_hint.take() {
-                    Some(usage) => conversation.add_user(&compaction_note(&input, usage)),
-                    None => conversation.add_user(&input),
+                    Some(usage) => {
+                        conversation.add_user_with_images(&compaction_note(&input, usage), &images)
+                    }
+                    None => conversation.add_user_with_images(&input, &images),
                 }
+                let image_labels: Vec<String> = images.iter().map(|i| i.label()).collect();
 
                 // Persist: set conversation name from first user input
                 if let Some(ref store) = conv_store {
@@ -965,10 +985,14 @@ pub fn run_repl(
                 // Echo user input then start animation (which draws the frame)
                 print_user_echo(&input);
                 println!();
+                print_user_attachments(&image_labels);
 
                 // Record UserInput event now (before streaming) so it
                 // precedes any orchestrator events pushed during the turn.
                 push_display_event(DisplayEvent::UserInput(input.clone()));
+                if !image_labels.is_empty() {
+                    push_display_event(DisplayEvent::UserImages(image_labels));
+                }
 
                 // Clear input buffer and enter non-canonical no-echo mode for processing
                 if let Ok(mut buf) = input_buf.lock() {
@@ -1861,8 +1885,10 @@ pub fn run_repl(
                     );
                     println!();
                     push_display_event(DisplayEvent::Cancelled);
-                    // Remove the user message that got no response
+                    // Remove the user message that got no response; its
+                    // images go back on the pile so a resubmit carries them.
                     conversation.pop_last_user();
+                    restore_pending_images(images);
                 } else if let Some(e) = tool_loop_error {
                     println!(
                         "{} {}",
@@ -2057,6 +2083,11 @@ pub fn run_repl(
                         }
                         CommandOutcome::Reinject(new_input) => {
                             initial_input = new_input;
+                            continue;
+                        }
+                        CommandOutcome::Submit(new_input) => {
+                            initial_input = new_input;
+                            auto_submit = true;
                             continue;
                         }
                         CommandOutcome::Handled => continue,

@@ -34,6 +34,7 @@ toml = { workspace = true }
 # Format-preserving TOML editor for in-place [telemetry] cli.toml edits.
 toml_edit = { workspace = true }
 anyhow = { workspace = true }
+base64 = { workspace = true }
 uuid = { workspace = true }
 regex = { workspace = true }
 clap = { workspace = true, features = ["env"] }

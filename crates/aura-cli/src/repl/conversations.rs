@@ -107,7 +107,8 @@ impl ConversationStore {
             .lines()
             .filter_map(|line| serde_json::from_str::<Message>(line).ok())
             .filter(|msg| msg.role == "user")
-            .filter_map(|msg| msg.content)
+            .map(|msg| msg.content_text().into_owned())
+            .filter(|text| !text.is_empty())
             .collect();
         // Collapse contiguous duplicate entries so up/down navigation skips them.
         entries.dedup();

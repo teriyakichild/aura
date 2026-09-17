@@ -1,3 +1,4 @@
+use crate::api::images::ImageAttachment;
 use crate::api::types::Message;
 
 pub struct ConversationHistory {
@@ -19,6 +20,13 @@ impl ConversationHistory {
 
     pub fn add_user(&mut self, content: &str) {
         self.messages.push(Message::user(content));
+    }
+
+    /// Add a user message with `images` attached after the text.
+    pub fn add_user_with_images(&mut self, content: &str, images: &[ImageAttachment]) {
+        let images = images.iter().map(ImageAttachment::to_image_url).collect();
+        self.messages
+            .push(Message::user_with_images(content, images));
     }
 
     pub fn add_assistant(&mut self, content: &str) {
@@ -122,7 +130,31 @@ mod tests {
         let history = ConversationHistory::new(Some("Be helpful"));
         assert_eq!(history.messages().len(), 1);
         assert_eq!(history.messages()[0].role, "system");
-        assert_eq!(history.messages()[0].content.as_deref(), Some("Be helpful"));
+        assert_eq!(history.messages()[0].content_text(), "Be helpful");
+    }
+
+    #[test]
+    fn add_user_with_images_builds_content_parts() {
+        use crate::api::types::{ContentPart, MessageContent};
+
+        let mut history = ConversationHistory::new(None);
+        let image = ImageAttachment {
+            name: "a.png".to_string(),
+            media_type: "image/png",
+            bytes: 4,
+            data_url: "data:image/png;base64,AAAA".to_string(),
+        };
+        history.add_user_with_images("look", &[image]);
+        let Some(MessageContent::Parts(parts)) = &history.messages()[0].content else {
+            panic!("expected content parts");
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(&parts[0], ContentPart::Text { text } if text == "look"));
+        assert!(matches!(
+            &parts[1],
+            ContentPart::ImageUrl { image_url } if image_url.url == "data:image/png;base64,AAAA"
+        ));
+        assert_eq!(history.messages()[0].content_text(), "look");
     }
 
     #[test]

@@ -4,20 +4,22 @@ use rustyline::history::DefaultHistory;
 use std::io::{self, Write};
 use std::sync::atomic::Ordering;
 
+use crate::api::images::ImageAttachment;
 use crate::api::types::DisplayEvent;
 use crate::backend::Backend;
 use crate::event_names;
 use crate::repl::conversations::ConversationStore;
 use crate::repl::history::ConversationHistory;
 use crate::repl::input_reader::{AuraHelper, HISTORY_COUNT, HISTORY_DEPTH};
+use crate::repl::registry::CommandOutcome;
 use crate::ui::prompt::{
-    clear_display_events, clear_stream_events, clear_stream_panel_in_place, extend_display_events,
-    get_model_cache, get_model_matches, is_expanded_output, last_sse_event, list_conversations,
-    load_and_restore_sse_events, print_help, print_welcome_state, record_session_event,
-    redraw_input_frame, replay_event_log_global, reset_session_status, reset_status_bar_tokens,
-    seed_model_cache, set_expanded_output, set_mid_stream_history, set_selected_model,
-    set_stream_conv_dir, set_stream_show_all, set_welcome_state, toggle_stream_panel,
-    with_event_log,
+    clear_display_events, clear_pending_images, clear_stream_events, clear_stream_panel_in_place,
+    extend_display_events, get_model_cache, get_model_matches, is_expanded_output, last_sse_event,
+    list_conversations, load_and_restore_sse_events, print_help, print_welcome_state,
+    record_session_event, redraw_input_frame, replay_event_log_global, reset_session_status,
+    reset_status_bar_tokens, seed_model_cache, set_expanded_output, set_mid_stream_history,
+    set_selected_model, set_stream_conv_dir, set_stream_show_all, set_welcome_state, stage_image,
+    toggle_stream_panel, with_event_log,
 };
 use crate::ui::state::{RESUME_MATCHES, get_tab_select_index, set_tab_select_index};
 use crate::ui::welcome::WelcomeState;
@@ -267,6 +269,86 @@ pub(crate) fn handle_rename(arg: &str, conv_store: &Option<ConversationStore>) {
     redraw_input_frame();
 }
 
+/// Split a `/image` argument into the path and the message that follows it.
+/// The path is the first whitespace-delimited word, or a `"..."`/`'...'`
+/// quoted run so paths with spaces can be typed.
+pub(crate) fn split_image_arg(arg: &str) -> (&str, &str) {
+    let arg = arg.trim();
+    if let Some(quote) = arg.chars().next().filter(|c| matches!(c, '"' | '\'')) {
+        let body = &arg[1..];
+        if let Some(end) = body.find(quote) {
+            return (&body[..end], body[end + 1..].trim());
+        }
+    }
+    let path = arg.split_whitespace().next().unwrap_or_default();
+    (path, arg[path.len()..].trim())
+}
+
+/// A parsed and loaded `/image` argument.
+pub(crate) enum ImageArg {
+    /// No path given.
+    Usage,
+    Loaded {
+        image: ImageAttachment,
+        message: Option<String>,
+    },
+    Failed(String),
+}
+
+/// Parse `<path> [message]` and load the file now, so a bad path fails at the
+/// command rather than mid-request.
+pub(crate) fn load_image_arg(arg: &str) -> ImageArg {
+    let (path, message) = split_image_arg(arg);
+    if path.is_empty() {
+        return ImageArg::Usage;
+    }
+    match ImageAttachment::load_user_path(path) {
+        Ok(image) => ImageArg::Loaded {
+            image,
+            message: (!message.is_empty()).then(|| message.to_string()),
+        },
+        Err(e) => ImageArg::Failed(format!("error: {e:#}")),
+    }
+}
+
+pub(crate) fn image_staged_notice(label: &str, count: usize) -> String {
+    format!(
+        "Attached {label}. {count} image{} will be sent with your next message.",
+        if count == 1 { "" } else { "s" }
+    )
+}
+
+/// Handle `/image <path> [message]` at the prompt: stage the image, and with a
+/// trailing message submit it right away carrying everything staged so far.
+pub(crate) fn handle_image(arg: &str) -> CommandOutcome {
+    match load_image_arg(arg) {
+        ImageArg::Usage => {
+            println!("Usage: /image <path> [message]");
+        }
+        ImageArg::Failed(error) => {
+            println!("{}", error.themed(AuraStyle::Error));
+        }
+        ImageArg::Loaded { image, message } => {
+            let label = image.label();
+            let count = stage_image(image);
+            match message {
+                Some(message) => {
+                    // The loop expects a drawn frame at the top of every
+                    // iteration, auto-submit included.
+                    redraw_input_frame();
+                    return CommandOutcome::Submit(message);
+                }
+                None => println!(
+                    "{}",
+                    image_staged_notice(&label, count).themed(AuraStyle::Muted)
+                ),
+            }
+        }
+    }
+    redraw_input_frame();
+    CommandOutcome::Handled
+}
+
 /// Handle the `/resume <id or name>` command.
 /// Returns the new initial_input if any was loaded from the resumed conversation.
 pub(crate) fn handle_resume(
@@ -332,6 +414,8 @@ pub(crate) fn handle_resume(
             store.delete();
         }
     }
+    // Staged images belong to the conversation being left.
+    clear_pending_images();
     let mut new_initial_input = None;
     match resume_conversation(&full_uuid, system_prompt) {
         Some((store, history, events, was_expanded, _usage_totals)) => {
@@ -676,6 +760,69 @@ pub(crate) fn format_telemetry_recent(
             out
         }
         Err(e) => format!("could not read inspection log: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    #[test]
+    fn split_image_arg_takes_first_word_or_quoted_path() {
+        assert_eq!(split_image_arg("shot.png"), ("shot.png", ""));
+        assert_eq!(
+            split_image_arg("  shot.png   what is this? "),
+            ("shot.png", "what is this?")
+        );
+        assert_eq!(
+            split_image_arg("\"my shot.png\" describe it"),
+            ("my shot.png", "describe it")
+        );
+        assert_eq!(split_image_arg("'a b.jpg'"), ("a b.jpg", ""));
+        // An unterminated quote is taken literally as the first word.
+        assert_eq!(split_image_arg("\"broken.png x"), ("\"broken.png", "x"));
+        assert_eq!(split_image_arg(""), ("", ""));
+    }
+
+    #[test]
+    fn load_image_arg_loads_and_splits_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.png");
+        std::fs::write(&path, b"png").unwrap();
+
+        let ImageArg::Loaded { image, message } = load_image_arg(path.to_str().unwrap()) else {
+            panic!("expected Loaded");
+        };
+        assert_eq!(image.name, "a.png");
+        assert_eq!(message, None);
+
+        let ImageArg::Loaded { message, .. } = load_image_arg(&format!("{} look", path.display()))
+        else {
+            panic!("expected Loaded");
+        };
+        assert_eq!(message.as_deref(), Some("look"));
+    }
+
+    #[test]
+    fn load_image_arg_reports_usage_and_failures() {
+        assert!(matches!(load_image_arg(""), ImageArg::Usage));
+        let ImageArg::Failed(error) = load_image_arg("/definitely/missing.png hi") else {
+            panic!("expected Failed");
+        };
+        assert!(
+            error.starts_with("error: /definitely/missing.png"),
+            "{error}"
+        );
+        assert!(error.contains("cannot read image"), "{error}");
+    }
+
+    #[test]
+    fn staged_notice_pluralizes() {
+        assert_eq!(
+            image_staged_notice("a.png (3 B)", 1),
+            "Attached a.png (3 B). 1 image will be sent with your next message."
+        );
+        assert!(image_staged_notice("b.png (3 B)", 2).contains("2 images will"));
     }
 }
 

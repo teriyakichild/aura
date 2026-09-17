@@ -57,6 +57,12 @@ pub struct Args {
     #[arg(long)]
     pub query: Option<String>,
 
+    /// Attach a local image file (.png, .jpg, .jpeg, .gif, .webp) to the
+    /// message. Repeat for several images. With --query the images ride on
+    /// that query; in the REPL they attach to the first message sent.
+    #[arg(long, value_name = "PATH")]
+    pub image: Vec<std::path::PathBuf>,
+
     /// Resume a previous conversation by ID (full or short prefix)
     #[arg(long)]
     pub resume: Option<String>,

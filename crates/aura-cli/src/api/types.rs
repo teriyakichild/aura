@@ -21,7 +21,7 @@ pub struct Message {
     pub role: String,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<MessageContent>,
     /// Tool calls made by the assistant (present when role is "assistant")
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -34,6 +34,89 @@ pub struct Message {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+}
+
+/// Message content in either OpenAI wire shape: a plain string, or an array
+/// of typed parts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    Text(String),
+    Parts(Vec<ContentPart>),
+}
+
+impl MessageContent {
+    /// The textual view of the content: the string itself, or the text parts
+    /// joined with newlines (image parts contribute nothing).
+    pub fn text(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::Text(text) => std::borrow::Cow::Borrowed(text),
+            Self::Parts(parts) => std::borrow::Cow::Owned(
+                parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        ContentPart::Text { text } => Some(text.as_str()),
+                        ContentPart::ImageUrl { .. } => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+        }
+    }
+}
+
+impl From<String> for MessageContent {
+    fn from(text: String) -> Self {
+        Self::Text(text)
+    }
+}
+
+impl From<&str> for MessageContent {
+    fn from(text: &str) -> Self {
+        Self::Text(text.to_owned())
+    }
+}
+
+/// One element of an array-shaped message `content` (OpenAI shape).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrl },
+}
+
+/// An `image_url` content part: a `data:` URL carrying base64 image bytes.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImageUrl {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<ImageDetail>,
+}
+
+/// Requested image fidelity (OpenAI `detail`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageDetail {
+    Low,
+    High,
+    Auto,
+}
+
+/// Elides the payload of a `data:` URL so a `{:?}` of a message never dumps
+/// base64 into logs.
+impl std::fmt::Debug for ImageUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let url: std::borrow::Cow<'_, str> = match self.url.split_once(',') {
+            Some((head, payload)) if head.starts_with("data:") => {
+                format!("{head},<{} bytes elided>", payload.len()).into()
+            }
+            _ => self.url.as_str().into(),
+        };
+        f.debug_struct("ImageUrl")
+            .field("url", &url)
+            .field("detail", &self.detail)
+            .finish()
+    }
 }
 
 /// Tool call info in an assistant message
@@ -56,7 +139,7 @@ impl Message {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: "system".to_string(),
-            content: Some(content.into()),
+            content: Some(MessageContent::Text(content.into())),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -66,7 +149,30 @@ impl Message {
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: "user".to_string(),
-            content: Some(content.into()),
+            content: Some(MessageContent::Text(content.into())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    /// Create a user message carrying `text` followed by `images`, in the
+    /// OpenAI content-part shape. With no images the content stays a plain
+    /// string so servers that only accept that shape keep working.
+    pub fn user_with_images(text: impl Into<String>, images: Vec<ImageUrl>) -> Self {
+        if images.is_empty() {
+            return Self::user(text);
+        }
+        let parts = std::iter::once(ContentPart::Text { text: text.into() })
+            .chain(
+                images
+                    .into_iter()
+                    .map(|image_url| ContentPart::ImageUrl { image_url }),
+            )
+            .collect();
+        Self {
+            role: "user".to_string(),
+            content: Some(MessageContent::Parts(parts)),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -76,7 +182,7 @@ impl Message {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: "assistant".to_string(),
-            content: Some(content.into()),
+            content: Some(MessageContent::Text(content.into())),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -90,7 +196,7 @@ impl Message {
     ) -> Self {
         Self {
             role: "assistant".to_string(),
-            content,
+            content: content.map(MessageContent::Text),
             tool_calls: Some(tool_calls),
             tool_call_id: None,
             name: None,
@@ -105,17 +211,19 @@ impl Message {
     ) -> Self {
         Self {
             role: "tool".to_string(),
-            content: Some(result.into()),
+            content: Some(MessageContent::Text(result.into())),
             tool_calls: None,
             tool_call_id: Some(call_id.into()),
             name: Some(name.into()),
         }
     }
 
-    /// Get content as a string reference, defaulting to empty string.
-    #[allow(dead_code)]
-    pub fn content_str(&self) -> &str {
-        self.content.as_deref().unwrap_or("")
+    /// The textual view of the content (see [`MessageContent::text`]),
+    /// empty when there is none.
+    pub fn content_text(&self) -> std::borrow::Cow<'_, str> {
+        self.content
+            .as_ref()
+            .map_or(std::borrow::Cow::Borrowed(""), MessageContent::text)
     }
 }
 
@@ -230,6 +338,8 @@ pub struct ShellCallDetail {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DisplayEvent {
     UserInput(String),
+    /// Labels of the images attached to the preceding `UserInput`.
+    UserImages(Vec<String>),
     ToolCall {
         tool_name: String,
         arguments: BTreeMap<String, serde_json::Value>,
@@ -404,7 +514,7 @@ mod tests {
     fn message_system() {
         let msg = Message::system("Be helpful");
         assert_eq!(msg.role, "system");
-        assert_eq!(msg.content.as_deref(), Some("Be helpful"));
+        assert_eq!(msg.content_text(), "Be helpful");
         assert!(msg.tool_calls.is_none());
         assert!(msg.tool_call_id.is_none());
         assert!(msg.name.is_none());
@@ -414,14 +524,14 @@ mod tests {
     fn message_user() {
         let msg = Message::user("Hello");
         assert_eq!(msg.role, "user");
-        assert_eq!(msg.content.as_deref(), Some("Hello"));
+        assert_eq!(msg.content_text(), "Hello");
     }
 
     #[test]
     fn message_assistant() {
         let msg = Message::assistant("Hi there");
         assert_eq!(msg.role, "assistant");
-        assert_eq!(msg.content.as_deref(), Some("Hi there"));
+        assert_eq!(msg.content_text(), "Hi there");
     }
 
     #[test]
@@ -436,7 +546,7 @@ mod tests {
         }];
         let msg = Message::assistant_with_tool_calls(Some("thinking...".to_string()), tool_calls);
         assert_eq!(msg.role, "assistant");
-        assert_eq!(msg.content.as_deref(), Some("thinking..."));
+        assert_eq!(msg.content_text(), "thinking...");
         assert_eq!(msg.tool_calls.as_ref().unwrap().len(), 1);
         assert_eq!(msg.tool_calls.as_ref().unwrap()[0].function.name, "Shell");
     }
@@ -445,19 +555,19 @@ mod tests {
     fn message_tool_result() {
         let msg = Message::tool_result("call_1", "Shell", "output here");
         assert_eq!(msg.role, "tool");
-        assert_eq!(msg.content.as_deref(), Some("output here"));
+        assert_eq!(msg.content_text(), "output here");
         assert_eq!(msg.tool_call_id.as_deref(), Some("call_1"));
         assert_eq!(msg.name.as_deref(), Some("Shell"));
     }
 
     #[test]
-    fn message_content_str_some() {
+    fn message_content_text_some() {
         let msg = Message::user("hello");
-        assert_eq!(msg.content_str(), "hello");
+        assert_eq!(msg.content_text(), "hello");
     }
 
     #[test]
-    fn message_content_str_none() {
+    fn message_content_text_none() {
         let msg = Message {
             role: "assistant".to_string(),
             content: None,
@@ -465,7 +575,50 @@ mod tests {
             tool_call_id: None,
             name: None,
         };
-        assert_eq!(msg.content_str(), "");
+        assert_eq!(msg.content_text(), "");
+    }
+
+    #[test]
+    fn user_with_images_serializes_as_content_parts() {
+        let msg = Message::user_with_images(
+            "what is this?",
+            vec![ImageUrl {
+                url: "data:image/png;base64,AAAA".to_string(),
+                detail: None,
+            }],
+        );
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what is this?"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+                ]
+            })
+        );
+        let parsed: Message = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.content, msg.content);
+        assert_eq!(parsed.content_text(), "what is this?");
+    }
+
+    #[test]
+    fn user_with_no_images_stays_plain_string() {
+        let msg = Message::user_with_images("hi", Vec::new());
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["content"], serde_json::json!("hi"));
+    }
+
+    #[test]
+    fn image_url_debug_elides_data_payload() {
+        let image = ImageUrl {
+            url: "data:image/png;base64,AAAAAAAA".to_string(),
+            detail: Some(ImageDetail::Low),
+        };
+        let debug = format!("{image:?}");
+        assert!(debug.contains("<8 bytes elided>"), "{debug}");
+        assert!(!debug.contains("AAAAAAAA"), "{debug}");
     }
 
     // -----------------------------------------------------------------------
@@ -478,7 +631,7 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.role, "user");
-        assert_eq!(parsed.content.as_deref(), Some("test message"));
+        assert_eq!(parsed.content_text(), "test message");
         // None fields should be omitted
         assert!(!json.contains("tool_calls"));
         assert!(!json.contains("tool_call_id"));

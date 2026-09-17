@@ -113,6 +113,36 @@ pub(crate) fn live_conversations(_args: &str) {
     redraw_input_frame();
 }
 
+/// `/image` while a response streams: stage the file without touching the
+/// stream. A trailing message becomes the queued next input, so it goes out
+/// with the staged images as soon as the stream ends.
+pub(crate) fn live_image(args: &str) {
+    use crate::repl::commands::{ImageArg, image_staged_notice, load_image_arg};
+
+    let notice = match load_image_arg(args) {
+        ImageArg::Usage => "Usage: /image <path> [message]".to_string(),
+        ImageArg::Failed(error) => error.themed(AuraStyle::Error).to_string(),
+        ImageArg::Loaded { image, message } => {
+            let label = image.label();
+            let count = super::state::stage_image(image);
+            match message {
+                Some(message) => {
+                    set_queued_input(message);
+                    update_status_bar();
+                    return;
+                }
+                None => image_staged_notice(&label, count)
+                    .themed(AuraStyle::Muted)
+                    .to_string(),
+            }
+        }
+    };
+    replay_event_log_global();
+    println!("{notice}");
+    reprint_cached_anim_lines();
+    redraw_input_frame();
+}
+
 pub(crate) fn live_model(_args: &str) {
     replay_event_log_global();
     match get_selected_model() {

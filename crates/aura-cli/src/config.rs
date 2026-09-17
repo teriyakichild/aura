@@ -118,6 +118,8 @@ pub struct AppConfig {
     pub model: Option<String>,
     pub system_prompt: Option<String>,
     pub query: Option<String>,
+    /// Image files to attach to the first message (see `Args::image`).
+    pub images: Vec<std::path::PathBuf>,
     pub resume: Option<String>,
     pub extra_headers: Vec<(String, String)>,
     pub force: bool,
@@ -192,6 +194,7 @@ impl AppConfig {
         let system_prompt = args.system_prompt.clone().or(file_config.system_prompt);
 
         let query = args.query.clone();
+        let images = args.image.clone();
         let resume = args.resume.clone();
 
         // Format: `Key1: Value1, Key2: Value2`. Splits on `,` then on the first
@@ -270,6 +273,7 @@ impl AppConfig {
             model,
             system_prompt,
             query,
+            images,
             resume,
             extra_headers,
             force: args.force,
@@ -684,6 +688,7 @@ mod tests {
             model: None,
             system_prompt: None,
             query: None,
+            image: Vec::new(),
             resume: None,
             force: false,
             pretty: false,
@@ -735,6 +740,7 @@ mod tests {
             model: Some("gpt-4".to_string()),
             system_prompt: Some("Be helpful".to_string()),
             query: Some("hello".to_string()),
+            image: vec![std::path::PathBuf::from("shot.png")],
             resume: None,
             force: false,
             pretty: false,
@@ -752,6 +758,7 @@ mod tests {
         assert_eq!(config.model.as_deref(), Some("gpt-4"));
         assert_eq!(config.system_prompt.as_deref(), Some("Be helpful"));
         assert_eq!(config.query.as_deref(), Some("hello"));
+        assert_eq!(config.images, [std::path::PathBuf::from("shot.png")]);
     }
 
     #[test]
@@ -1008,6 +1015,7 @@ segments = []
             model: None,
             system_prompt: None,
             query: None,
+            images: Vec::new(),
             resume: None,
             extra_headers: vec![],
             force: false,
@@ -1033,6 +1041,7 @@ segments = []
             model: None,
             system_prompt: None,
             query: None,
+            images: Vec::new(),
             resume: None,
             extra_headers: vec![],
             force: false,
@@ -1058,6 +1067,7 @@ segments = []
             model: None,
             system_prompt: None,
             query: None,
+            images: Vec::new(),
             resume: None,
             extra_headers: vec![],
             force: false,
@@ -1080,6 +1090,7 @@ segments = []
             model: None,
             system_prompt: None,
             query: None,
+            images: Vec::new(),
             resume: None,
             extra_headers: vec![],
             force: false,

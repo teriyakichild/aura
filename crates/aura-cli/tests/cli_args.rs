@@ -37,7 +37,37 @@ fn help_flag_exits_zero() {
         "help should mention --api-url"
     );
     assert!(stdout.contains("--query"), "help should mention --query");
+    assert!(stdout.contains("--image"), "help should mention --image");
     assert!(stdout.contains("--force"), "help should mention --force");
+}
+
+#[test]
+fn query_with_missing_image_fails_before_any_request() {
+    let (mut cmd, _home, _cwd) = aura_cli_isolated();
+    let output = cmd
+        .arg("--api-url")
+        .arg("http://127.0.0.1:1")
+        .arg("--query")
+        .arg("what is this?")
+        .arg("--image")
+        .arg("/definitely/not/here.png")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "missing image should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("here.png"),
+        "stderr names the path: {stderr}"
+    );
+    assert!(
+        stderr.contains("cannot read image"),
+        "stderr explains the failure: {stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "stdout stays empty on failure: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 #[test]
