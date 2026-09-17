@@ -529,6 +529,17 @@ pub fn update_input_hint(line: &str) {
             let entries: Vec<String> = filtered.iter().map(|n| mark(n)).collect();
             build_columnar_hints(&entries, tab_idx)
         }
+    } else if line == "/image" || line.starts_with("/image ") {
+        match crate::repl::image_complete::image_hint(line) {
+            Some(entries) if entries.is_empty() => {
+                vec![format!(
+                    "{}",
+                    "no matching images or directories".themed(AuraStyle::Muted)
+                )]
+            }
+            Some(entries) => build_columnar_hints(&entries, None),
+            None => vec![],
+        }
     } else if line.starts_with('/') {
         if let Ok(mut guard) = RESUME_MATCHES.lock() {
             guard.clear();

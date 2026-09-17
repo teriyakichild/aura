@@ -262,7 +262,17 @@ fn mid_stream_history_down(buf: &mut String) {
 /// TabHandler/ShiftTabHandler so tab completion works the same way during
 /// streaming as it does at the prompt. Returns `true` if any matches existed
 /// (and the hint was refreshed).
-fn mid_stream_cycle_matches(buf: &str, forward: bool) -> bool {
+fn mid_stream_cycle_matches(buf: &mut String, forward: bool) -> bool {
+    match crate::repl::image_complete::image_tab(buf, forward) {
+        crate::repl::image_complete::TabStep::NotImage => {}
+        crate::repl::image_complete::TabStep::NoMatch => return false,
+        crate::repl::image_complete::TabStep::Line(new_line) => {
+            *buf = new_line;
+            render_input_line(buf);
+            update_input_hint(buf);
+            return true;
+        }
+    }
     let match_count = if buf == "/model" || buf.starts_with("/model ") {
         get_model_matches().len()
     } else if buf == "/resume" || buf.starts_with("/resume ") {

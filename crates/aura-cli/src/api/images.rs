@@ -29,7 +29,7 @@ pub struct ImageAttachment {
 ///
 /// The list is the intersection of what rig models (`ImageMediaType`) and
 /// what OpenAI, Anthropic, Bedrock, Gemini and Ollama accept as inline base64.
-fn media_type_for_extension(extension: &str) -> Option<&'static str> {
+pub(crate) fn media_type_for_extension(extension: &str) -> Option<&'static str> {
     match extension.to_ascii_lowercase().as_str() {
         "png" => Some("image/png"),
         "jpg" | "jpeg" => Some("image/jpeg"),
@@ -40,7 +40,7 @@ fn media_type_for_extension(extension: &str) -> Option<&'static str> {
 }
 
 /// Expand a leading `~` or `~/` to the user's home directory.
-fn expand_home(path: &str) -> PathBuf {
+pub(crate) fn expand_home(path: &str) -> PathBuf {
     if (path == "~" || path.starts_with("~/"))
         && let Some(home) = dirs::home_dir()
     {

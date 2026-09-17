@@ -3,6 +3,7 @@ pub mod conversations;
 #[cfg(feature = "standalone-cli")]
 pub(crate) mod governance;
 pub mod history;
+pub(crate) mod image_complete;
 pub mod input_reader;
 pub mod r#loop;
 pub mod mcp;

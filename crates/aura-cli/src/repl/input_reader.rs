@@ -11,6 +11,7 @@ use std::borrow::Cow;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::repl::image_complete::image_completions;
 use crate::repl::registry::{lookup, matching_commands};
 use crate::ui::prompt::{
     at_stream_top, check_resize, clear_screen_preserve_frame, commit_cursor_row,
@@ -35,8 +36,19 @@ pub(crate) static HISTORY_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 pub(crate) struct AuraHelper;
 
+/// Tab completion runs only for the `/image` path argument; every other
+/// Tab context is handled by [`TabHandler`] before rustyline gets here.
 impl Completer for AuraHelper {
     type Candidate = String;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<String>)> {
+        Ok(image_completions(line, pos).unwrap_or((pos, Vec::new())))
+    }
 }
 
 impl Hinter for AuraHelper {
@@ -293,7 +305,9 @@ impl ConditionalEventHandler for TabHandler {
         } else if line == "/style" || line.starts_with("/style ") {
             get_style_matches().len()
         } else {
-            return None; // not in a list context, pass through
+            // Not a list context: rustyline's own completion runs, which
+            // is `/image` path completion (see `Completer for AuraHelper`).
+            return None;
         };
         if match_count == 0 {
             return Some(Cmd::Noop);

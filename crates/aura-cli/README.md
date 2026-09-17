@@ -359,7 +359,7 @@ Once inside the REPL, the slash commands below are available. All slash commands
 | `/conversations`   | List saved conversations                                            |
 | `/resume <filter>` | Resume a saved conversation by ID prefix or name                    |
 | `/rename <name>`   | Rename the current conversation                                     |
-| `/image <path> [message]` | Attach a local image to the next message, or send `message` with it right away; quote paths with spaces |
+| `/image <path> [message]` | Attach a local image to the next message, or send `message` with it right away. Tab completes the path (directories and image files; Tab again cycles); quote paths with spaces |
 | `/model <filter>`  | Browse and select a model (see [Model Selection](#model-selection)) |
 | `/style [name]`    | Switch visual style: `normal`, `high-contrast`, `no-colors`         |
 | `/mcp [add]`       | List the agent's MCP servers, or install one via a guided flow      |
